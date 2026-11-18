@@ -1,0 +1,402 @@
+#!/bin/bash
+# postinst — OKIDIA kurulum sonrası yapılandırma / Post-installation configuration
+# Her üç paket için ortak (hangi binary var ise o yapılandırılır)
+# Common for all packages (configures whichever binary is present)
+
+OKIDIA_DIR="/etc/okidia"
+CERTS_DIR="/etc/okidia/certs"
+LOG_DIR="/var/log/okidia"
+LIB_DIR="/var/lib/okidia"
+BACKUP_DIR="/var/lib/okidia/backup"
+OKIDIA_USER="okidia"
+
+# ── Sistem Dili Tespiti (Language Detection) ───────────────────
+LANG_ENV="${LC_ALL:-${LC_MESSAGES:-${LANG:-en}}}"
+IS_TR=0
+if [[ "$LANG_ENV" =~ ^tr || "$LANG_ENV" =~ ^TR ]]; then
+    IS_TR=1
+fi
+
+msg() {
+    local tr_text="$1"
+    local en_text="$2"
+    if [ "$IS_TR" -eq 1 ]; then
+        echo "$tr_text"
+    else
+        echo "$en_text"
+    fi
+}
+
+log() {
+    local tr_text="$1"
+    local en_text="$2"
+    if [ -z "$en_text" ]; then
+        echo "[OKIDIA] $tr_text"
+    else
+        if [ "$IS_TR" -eq 1 ]; then
+            echo "[OKIDIA] $tr_text"
+        else
+            echo "[OKIDIA] $en_text"
+        fi
+    fi
+}
+
+err() {
+    local tr_text="$1"
+    local en_text="$2"
+    if [ -z "$en_text" ]; then
+        echo "[OKIDIA] HATA: $tr_text" >&2
+    else
+        if [ "$IS_TR" -eq 1 ]; then
+            echo "[OKIDIA] HATA: $tr_text" >&2
+        else
+            echo "[OKIDIA] ERROR: $en_text" >&2
+        fi
+    fi
+}
+
+# ── Dizinler ────────────────────────────────────────────────────
+mkdir -p "$OKIDIA_DIR" "$LOG_DIR" "$LIB_DIR" "$BACKUP_DIR" "$CERTS_DIR" || true
+mkdir -p /usr/share/okidia || true
+
+# ── Sistem kullanıcısı ve grubu ─────────────────────────────────
+if ! getent group "$OKIDIA_USER" &>/dev/null; then
+    groupadd --system "$OKIDIA_USER" || true
+    log "Sistem grubu oluşturuldu: $OKIDIA_USER" \
+        "System group created: $OKIDIA_USER"
+fi
+
+if ! id "$OKIDIA_USER" &>/dev/null; then
+    useradd --system --no-create-home \
+            --home-dir "$LIB_DIR" \
+            --shell /usr/sbin/nologin \
+            --gid "$OKIDIA_USER" \
+            --comment "OKIDIA Service Account" \
+            "$OKIDIA_USER" || true
+    log "Sistem kullanıcısı oluşturuldu: $OKIDIA_USER" \
+        "System user created: $OKIDIA_USER"
+fi
+
+# ── PKI: Sertifika üretimi (sadece master/broker kurulumunda) ───
+if [ -f /usr/bin/okidia-master ] || [ -f /usr/bin/okidia-broker ]; then
+    mkdir -p "$CERTS_DIR/broker" "$CERTS_DIR/master/Profiles" || true
+    if [ ! -f "$CERTS_DIR/broker/ca.key" ]; then
+        log "Root CA oluşturuluyor..." \
+            "Generating Root CA..."
+        openssl ecparam -name prime256v1 -genkey -noout \
+            -out "$CERTS_DIR/broker/ca.key" 2>/dev/null
+        openssl req -new -x509 -days 3650 \
+            -key "$CERTS_DIR/broker/ca.key" \
+            -out "$CERTS_DIR/broker/ca.crt" \
+            -subj "/C=TR/O=OKIDIA/OU=Campus/CN=OKIDIA-CA" \
+            2>/dev/null
+        log "Root CA oluşturuldu." \
+            "Root CA generated successfully."
+    fi
+
+    if [ -f /usr/bin/okidia-master ]; then
+        chown -R root:okidia "$CERTS_DIR/master" 2>/dev/null || true
+        find "$CERTS_DIR/master" -type d -exec chmod 2770 {} + 2>/dev/null || true
+    fi
+
+    if [ -f /usr/bin/okidia-broker ] && [ ! -f "$CERTS_DIR/broker/broker.crt" ]; then
+        log "Broker sertifikası oluşturuluyor..." \
+            "Generating Broker certificate..."
+        HN=$(hostname -f 2>/dev/null || hostname)
+        openssl ecparam -name prime256v1 -genkey -noout \
+            -out "$CERTS_DIR/broker/broker.key" 2>/dev/null
+        openssl req -new -key "$CERTS_DIR/broker/broker.key" \
+            -out "$CERTS_DIR/broker/broker.csr" \
+            -subj "/C=TR/O=OKIDIA/OU=Broker/CN=$HN" 2>/dev/null
+        openssl x509 -req -days 3650 \
+            -in "$CERTS_DIR/broker/broker.csr" \
+            -CA "$CERTS_DIR/broker/ca.crt" \
+            -CAkey "$CERTS_DIR/broker/ca.key" \
+            -CAcreateserial \
+            -out "$CERTS_DIR/broker/broker.crt" 2>/dev/null
+        rm -f "$CERTS_DIR/broker/broker.csr"
+        log "Broker sertifikası oluşturuldu." \
+            "Broker certificate generated successfully."
+    fi
+fi
+
+# ── Agent: agent.key oluştur ────────────────────────────────────
+if [ -f /usr/bin/okidia-agent ]; then
+    mkdir -p "$CERTS_DIR/agent" || true
+    if [ ! -f "$CERTS_DIR/agent/agent.key" ]; then
+        log "Agent anahtarı oluşturuluyor..." \
+            "Generating Agent key..."
+        openssl ecparam -name prime256v1 -genkey -noout \
+            -out "$CERTS_DIR/agent/agent.key" 2>/dev/null
+        log "agent.key oluşturuldu." \
+            "agent.key generated successfully."
+    fi
+
+    log "NOT: Agent sertifikası Broker'a ilk bağlantıda otomatik alınacak." \
+        "NOTE: Agent certificate will be automatically obtained on first Broker connection."
+fi
+
+# ── Varsayılan config dosyası ────────────────────────────────────
+if [ ! -f "$OKIDIA_DIR/config" ]; then
+    cat > "$OKIDIA_DIR/config" << 'CONFIGEOF'
+[network]
+broker_port=11200
+agent_port=11200
+CONFIGEOF
+    chmod 644 "$OKIDIA_DIR/config"
+    log "Varsayılan yapılandırma oluşturuldu: $OKIDIA_DIR/config (port: 11200)" \
+        "Default configuration created: $OKIDIA_DIR/config (port: 11200)"
+fi
+
+# ── İzinler — tüm dosyalar için ─────────────────────────────────
+chown -R root:okidia "$OKIDIA_DIR" 2>/dev/null || true
+chown -R "$OKIDIA_USER:$OKIDIA_USER" "$LOG_DIR" "$LIB_DIR" 2>/dev/null || true
+
+# Kullanıcıları okidia grubuna dahil et
+for u in $(getent passwd | awk -F: '$3 >= 1000 && $3 < 65534 {print $1}'); do
+    usermod -aG "$OKIDIA_USER" "$u" 2>/dev/null || true
+done
+
+# LIB_DIR gruba yazılabilir olsun
+chmod 775 "$LIB_DIR" 2>/dev/null || true
+chown "$OKIDIA_USER:$OKIDIA_USER" "$LIB_DIR" 2>/dev/null || true
+
+# DB dosyaları izinleri
+for dbname in "okidia" "okidia_audit" "okidia_chat"; do
+    for ext in ".db" ".db-wal" ".db-shm"; do
+        dbfile="$LIB_DIR/${dbname}${ext}"
+        [ -f "$dbfile" ] && chmod 664 "$dbfile" 2>/dev/null || true
+        [ -f "$dbfile" ] && chown "$OKIDIA_USER:$OKIDIA_USER" "$dbfile" 2>/dev/null || true
+    done
+done
+
+# ACL ile kalıcı kıl
+if command -v setfacl &>/dev/null; then
+    setfacl -d -m g:"$OKIDIA_USER":rw "$LIB_DIR" 2>/dev/null || true
+fi
+
+chmod 755 "$OKIDIA_DIR"
+chmod 755 "$CERTS_DIR" 2>/dev/null || true
+chmod 755 "$CERTS_DIR/agent" 2>/dev/null || true
+chmod 750 "$CERTS_DIR/broker" 2>/dev/null || true
+
+[ -f "$CERTS_DIR/broker/ca.key" ] && chmod 600 "$CERTS_DIR/broker/ca.key"
+[ -f "$CERTS_DIR/broker/ca.crt" ] && chmod 644 "$CERTS_DIR/broker/ca.crt"
+[ -f "$CERTS_DIR/broker/ca.srl" ] && chmod 666 "$CERTS_DIR/broker/ca.srl"
+
+[ -f "$CERTS_DIR/broker/broker.key" ] && chmod 600 "$CERTS_DIR/broker/broker.key"
+[ -f "$CERTS_DIR/broker/broker.crt" ] && chmod 644 "$CERTS_DIR/broker/broker.crt"
+
+[ -f "$CERTS_DIR/agent/agent.key"  ] && chmod 600 "$CERTS_DIR/agent/agent.key"
+[ -f "$CERTS_DIR/agent/agent.crt"  ] && chmod 644 "$CERTS_DIR/agent/agent.crt"
+
+if [ -f /usr/bin/okidia-master ] || [ -f /usr/bin/okidia-broker ]; then
+    chown root:okidia "$CERTS_DIR/broker/ca.key" 2>/dev/null || true
+    chmod 600 "$CERTS_DIR/broker/ca.key"
+    [ -f "$CERTS_DIR/broker/ca.srl" ] && chown "$OKIDIA_USER:$OKIDIA_USER" "$CERTS_DIR/broker/ca.srl" 2>/dev/null || true
+    [ -f "$CERTS_DIR/broker/ca.srl" ] && chmod 664 "$CERTS_DIR/broker/ca.srl"
+    chown root:okidia "$CERTS_DIR/broker" 2>/dev/null || true
+
+    if [ -f /usr/bin/okidia-master ]; then
+        chown -R root:okidia "$CERTS_DIR/master" 2>/dev/null || true
+        log "Master dizini sahipliği root:okidia olarak ayarlandı." \
+            "Master directory ownership set to root:okidia."
+        
+        find "$CERTS_DIR/master" -type d -exec chmod 2770 {} + 2>/dev/null || true
+        find "$CERTS_DIR/master" -type f -name "*.crt" -exec chmod 664 {} + 2>/dev/null || true
+        find "$CERTS_DIR/master" -type f -name "*.key" -exec chmod 660 {} + 2>/dev/null || true
+    fi
+
+    log "İzinler ayarlandı (ca.key: root:okidia, sistem kullanıcıları okidia grubuna eklendi)." \
+        "Permissions configured (ca.key: root:okidia, system users added to okidia group)."
+fi
+
+# ── Agent .deb arşivi (Master üzerinden OTA / Deploy için) ─────
+if [ -f /usr/bin/okidia-master ]; then
+    AGENT_DEB=$(find /tmp /root /home \
+        -maxdepth 3 -name "okidia-agent_*.deb" 2>/dev/null | head -1)
+    if [ -n "$AGENT_DEB" ] && [ "$AGENT_DEB" != "/usr/share/okidia/okidia-agent.deb" ]; then
+        cp "$AGENT_DEB" /usr/share/okidia/okidia-agent.deb
+        log "Agent paketi arşivlendi: /usr/share/okidia/okidia-agent.deb" \
+            "Agent package archived: /usr/share/okidia/okidia-agent.deb"
+    fi
+fi
+
+# ── systemd ─────────────────────────────────────────────────────
+case "$1" in
+  configure)
+    if command -v systemctl &>/dev/null; then
+        systemctl daemon-reload || true
+        
+        PACKAGE="${DPKG_MAINTSCRIPT_PACKAGE:-unknown}"
+        log "Yapılandırılan paket: $PACKAGE" \
+            "Configured package: $PACKAGE"
+
+        # ── okidia-broker ──────────────────────────────────────────
+        if [ "$PACKAGE" = "okidia-broker" ] && [ -f /usr/bin/okidia-broker ]; then
+            mkdir -p /etc/systemd/system/okidia-broker.service.d
+            cat > /etc/systemd/system/okidia-broker.service.d/readwrite.conf << 'DROPIN'
+[Service]
+ReadWritePaths=/etc/okidia/certs/broker/ca.srl
+DROPIN
+            log "Broker drop-in yapılandırıldı (ReadWritePaths)." \
+                "Broker service drop-in configured (ReadWritePaths)."
+            
+            systemctl unmask okidia-broker.service || true
+            systemctl enable okidia-broker.service || true
+            systemctl restart okidia-broker.service || true
+            log "okidia-broker başlatıldı ve etkinleştirildi." \
+                "okidia-broker started and enabled."
+
+            # Broker headless ise ve kurulum kodu üretildiyse, masaüstüne kaydet
+            REAL_USER=$(getent passwd | awk -F: '$3 >= 1000 && $3 < 65534 {print $1; exit}')
+            if [ -n "$REAL_USER" ]; then
+                for i in {1..10}; do
+                    if [ -f /var/lib/okidia/setup_code.txt ]; then
+                        CODE=$(cat /var/lib/okidia/setup_code.txt)
+                        DESKTOP_DIR="/home/$REAL_USER/Masaüstü"
+                        [ ! -d "$DESKTOP_DIR" ] && DESKTOP_DIR="/home/$REAL_USER/Desktop"
+                        if [ -d "$DESKTOP_DIR" ]; then
+                            if [ "$IS_TR" -eq 1 ]; then
+                                cat > "$DESKTOP_DIR/OKIDIA_Kurulum_Kodu.txt" << EOF
+OKIDIA Master ilk kurulumu için gereken kod:
+
+$CODE
+
+Bu kod tek kullanımlıktır ve Master kurulumu tamamlandıktan sonra geçersiz olacaktır.
+Terminal kapansa bile bu dosyadan koda ulaşabilirsiniz.
+EOF
+                            else
+                                cat > "$DESKTOP_DIR/OKIDIA_Setup_Code.txt" << EOF
+Setup code required for OKIDIA Master initial setup:
+
+$CODE
+
+This code is one-time use and will become invalid once Master setup is completed.
+You can retrieve the code from this file even if the terminal is closed.
+EOF
+                            fi
+                            chown -R "$REAL_USER":"$REAL_USER" "$DESKTOP_DIR/OKIDIA_Kurulum_Kodu.txt" 2>/dev/null || true
+                            chown -R "$REAL_USER":"$REAL_USER" "$DESKTOP_DIR/OKIDIA_Setup_Code.txt" 2>/dev/null || true
+                            chmod 644 "$DESKTOP_DIR"/OKIDIA_*_Code.txt "$DESKTOP_DIR"/OKIDIA_*_Kodu.txt 2>/dev/null || true
+                            log "Kurulum kodu masaüstüne kaydedildi." \
+                                "Setup code saved to desktop."
+                        fi
+                        break
+                    fi
+                    sleep 0.5
+                done
+            fi
+
+            # Broker tray — masaüstü oturumunda varsa başlat
+            ACTIVE_USER=$(who | awk '/:0/{print $1; exit}')
+            if [ -n "$ACTIVE_USER" ] && [ "$ACTIVE_USER" != "root" ] \
+               && [ -f /usr/bin/okidia-broker-tray ]; then
+                pkill -f okidia-broker-tray 2>/dev/null || true
+                pkill -x okidia-broker-t 2>/dev/null || true
+                sleep 0.5
+                log "Broker tray başlatılıyor: $ACTIVE_USER" \
+                    "Starting Broker tray for: $ACTIVE_USER"
+                su - "$ACTIVE_USER" -c \
+                    "DISPLAY=:0 XAUTHORITY=/home/$ACTIVE_USER/.Xauthority \
+                     nohup /usr/bin/okidia-broker-tray >/dev/null 2>&1 &" || true
+            fi
+        fi
+
+        # ── okidia-agent ───────────────────────────────────────────
+        if [ "$PACKAGE" = "okidia-agent" ] && [ -f /usr/bin/okidia-agent ]; then
+            [ -f /usr/bin/okidia-agent-recover.sh ] && chmod 755 /usr/bin/okidia-agent-recover.sh || true
+            systemctl unmask okidia-agent.service || true
+            systemctl unmask okidia-agent-recover.service || true
+            systemctl enable okidia-agent.service || true
+            systemctl restart okidia-agent.service || true
+            log "okidia-agent başlatıldı ve etkinleştirildi (Self-Healing OnFailure aktif)." \
+                "okidia-agent started and enabled (Self-Healing OnFailure active)."
+
+            # Eski tray süreçlerini öldür
+            pkill -x okidia-tray 2>/dev/null || true
+            sleep 1
+
+            # Mevcut oturumdaki kullanıcı için tray'i başlat
+            ACTIVE_USER=$(loginctl show-seat seat0 --property=ActiveSession --value 2>/dev/null | xargs -I{} loginctl show-session {} --property=Name --value 2>/dev/null)
+            if [ -z "$ACTIVE_USER" ] || [ "$ACTIVE_USER" = "root" ]; then
+                ACTIVE_USER=$(who | awk '/:[0-9]/{print $1; exit}')
+            fi
+            if [ -z "$ACTIVE_USER" ] || [ "$ACTIVE_USER" = "root" ]; then
+                ACTIVE_USER=$(getent passwd | awk -F: '$3 >= 1000 && $3 < 65534 {print $1; exit}')
+            fi
+
+            if [ -n "$ACTIVE_USER" ] && [ "$ACTIVE_USER" != "root" ]; then
+                USER_UID=$(id -u "$ACTIVE_USER" 2>/dev/null)
+                USER_XAUTH=""
+                for xf in "/run/user/$USER_UID/gdm/Xauthority" "/run/user/$USER_UID/xauth" "/home/$ACTIVE_USER/.Xauthority"; do
+                    if [ -f "$xf" ]; then USER_XAUTH="$xf"; break; fi
+                done
+                if [ -z "$USER_XAUTH" ]; then
+                    USER_XAUTH=$(find "/run/user/$USER_UID" -name "*Xauthority*" -o -name "xauth_*" 2>/dev/null | head -1)
+                fi
+                [ -z "$USER_XAUTH" ] && USER_XAUTH="/home/$ACTIVE_USER/.Xauthority"
+
+                USER_DISP=$(loginctl show-seat seat0 --property=ActiveSession --value 2>/dev/null | xargs -I{} loginctl show-session {} --property=Display --value 2>/dev/null)
+                [ -z "$USER_DISP" ] && USER_DISP=":0"
+
+                log "Tray başlatılıyor: $ACTIVE_USER (Ekran: $USER_DISP, Xauth: $USER_XAUTH)" \
+                    "Starting Agent tray for: $ACTIVE_USER (Display: $USER_DISP, Xauth: $USER_XAUTH)"
+                su - "$ACTIVE_USER" -c \
+                    "DISPLAY=$USER_DISP XAUTHORITY=$USER_XAUTH XDG_RUNTIME_DIR=/run/user/$USER_UID DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$USER_UID/bus \
+                     nohup /usr/bin/okidia-tray >/dev/null 2>&1 &" || true
+            fi
+        fi
+
+        # ── okidia-master ──────────────────────────────────────────
+        if [ "$PACKAGE" = "okidia-master" ] && [ -f /usr/bin/okidia-master ]; then
+            log "okidia-master kuruldu. Başlatmak için terminalden 'okidia-master' çalıştırabilir veya başlat menüsünü kullanabilirsiniz." \
+                "okidia-master installed. You can launch it by running 'okidia-master' or via the application menu."
+        fi
+    fi
+
+    # ── Masaüstü / Başlat menüsü entegrasyonu ───────────────────
+    if command -v gtk-update-icon-cache &>/dev/null; then
+        gtk-update-icon-cache -f -t /usr/share/icons/hicolor/ 2>/dev/null || true
+        log "İkon önbelleği güncellendi." \
+            "Icon cache updated."
+    fi
+
+    if command -v update-desktop-database &>/dev/null; then
+        update-desktop-database /usr/share/applications/ 2>/dev/null || true
+        log "Masaüstü veritabanı güncellendi." \
+            "Desktop database updated."
+    fi
+
+    echo ""
+    if [ "$IS_TR" -eq 1 ]; then
+        echo "╔══════════════════════════════════════════╗"
+        echo "║        OKIDIA Kurulumu Tamamlandı        ║"
+        echo "╠══════════════════════════════════════════╣"
+        echo "║  Sertifika dizini: /etc/okidia/certs/    ║"
+        echo "║  Log dizini:       /var/log/okidia/      ║"
+        echo "║  Veri dizini:      /var/lib/okidia/      ║"
+        if [ -f /usr/bin/okidia-master ]; then
+        echo "╠══════════════════════════════════════════╣"
+        echo "║  İlk çalıştırmada kurulum sihirbazı      ║"
+        echo "║  broker'ı otomatik bulacaktır.           ║"
+        fi
+        echo "╚══════════════════════════════════════════╝"
+    else
+        echo "╔══════════════════════════════════════════╗"
+        echo "║       OKIDIA Installation Complete       ║"
+        echo "╠══════════════════════════════════════════╣"
+        echo "║  Certificates:     /etc/okidia/certs/    ║"
+        echo "║  Logs directory:   /var/log/okidia/      ║"
+        echo "║  Data directory:   /var/lib/okidia/      ║"
+        if [ -f /usr/bin/okidia-master ]; then
+        echo "╠══════════════════════════════════════════╣"
+        echo "║  Setup wizard will locate broker         ║"
+        echo "║  automatically upon initial launch.      ║"
+        fi
+        echo "╚══════════════════════════════════════════╝"
+    fi
+    ;;
+esac
+
+exit 0

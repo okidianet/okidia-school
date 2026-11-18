@@ -1,0 +1,143 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Erişim Engellendi - Okidia</title>
+    <style>
+        :root {
+            --bg-color: #f8fafc;
+            --card-bg: #ffffff;
+            --text-primary: #1e293b;
+            --text-secondary: #64748b;
+            --border-color: #e2e8f0;
+            --accent-red: #ef4444;
+            --accent-red-bg: #fee2e2;
+            --shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.05), 0 8px 10px -6px rgba(0, 0, 0, 0.05);
+        }
+
+        @media (prefers-color-scheme: dark) {
+            :root {
+                --bg-color: #0f172a;
+                --card-bg: #1e293b;
+                --text-primary: #f1f5f9;
+                --text-secondary: #94a3b8;
+                --border-color: #334155;
+                --accent-red: #f87171;
+                --accent-red-bg: #450a0a;
+                --shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.3), 0 8px 10px -6px rgba(0, 0, 0, 0.2);
+            }
+        }
+
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+        }
+
+        body {
+            background-color: var(--bg-color);
+            color: var(--text-primary);
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 1.5rem;
+        }
+
+        .card {
+            background: var(--card-bg);
+            border: 1px solid var(--border-color);
+            border-radius: 16px;
+            box-shadow: var(--shadow);
+            max-width: 480px;
+            width: 100%;
+            padding: 2.5rem 2rem;
+            text-align: center;
+            animation: fadeIn 0.4s ease-out;
+        }
+
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(12px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+
+        .icon-container {
+            width: 80px;
+            height: 80px;
+            border-radius: 50%;
+            background-color: var(--accent-red-bg);
+            color: var(--accent-red);
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            margin-bottom: 1.5rem;
+        }
+
+        .icon-container svg {
+            width: 44px;
+            height: 44px;
+            fill: currentColor;
+        }
+
+        h1 {
+            font-size: 1.5rem;
+            font-weight: 700;
+            margin-bottom: 0.75rem;
+            letter-spacing: -0.025em;
+        }
+
+        p.description {
+            font-size: 0.95rem;
+            line-height: 1.5;
+            color: var(--text-secondary);
+            margin-bottom: 1.75rem;
+        }
+
+        .reason-box {
+            background: var(--bg-color);
+            border: 1px dashed var(--border-color);
+            border-radius: 8px;
+            padding: 0.75rem 1rem;
+            font-size: 0.85rem;
+            color: var(--text-secondary);
+            margin-bottom: 1.75rem;
+            display: inline-block;
+            width: 100%;
+        }
+
+        .footer {
+            font-size: 0.75rem;
+            color: var(--text-secondary);
+            opacity: 0.8;
+            border-top: 1px solid var(--border-color);
+            padding-top: 1.25rem;
+        }
+
+        .footer b {
+            color: var(--text-primary);
+        }
+    </style>
+</head>
+<body>
+    <div class="card">
+        <div class="icon-container">
+            <svg viewBox="0 0 24 24">
+                <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm0 18c-4.42 0-8-3.58-8-8 0-1.85.63-3.55 1.69-4.9L16.9 18.31C15.55 19.37 13.85 20 12 20zm6.31-3.1L7.1 5.69C8.45 4.63 10.15 4 12 4c4.42 0 8 3.58 8 8 0 1.85-.63 3.55-1.69 4.9z"/>
+            </svg>
+        </div>
+        <h1>Web Erişimi Sınırlandırıldı</h1>
+        <p class="description">
+            Bu web sayfasına veya internet içeriğine erişim öğretmeniniz ya da sınıf yöneticisi tarafından geçici olarak durdurulmuştur.
+        </p>
+        <div class="reason-box">
+            🛡️ <strong>Güvenlik Politikası:</strong> Ders esnasında konsantrasyonu sağlamak amacıyla güvenlik filtresi devrededir.
+        </div>
+        <div class="footer">
+            <b>Okidia</b> Sınıf Yönetim Sistemi
+        </div>
+    </div>
+</body>
+</html>
+

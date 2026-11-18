@@ -1,0 +1,74 @@
+================================================================================
+OKIDIA — Okul İçi Denetim ve İletişim Ağı
+Yazılım Lisans Sözleşmesi ve Üçüncü Parti Açık Kaynak Lisans Atıfları
+================================================================================
+
+Telif Hakkı (c) 2024-2026 OKIDIA (Onur Tamer Ekmenci). Tüm hakları saklıdır.
+Resmi Web Sitesi: https://www.okidia.net
+İletişim: info@okidia.net
+
+Bu yazılım (OKIDIA Master, OKIDIA Agent, OKIDIA Broker ve ilişkili araçlar);
+mülkiyeti saklı ticari bir üründür. Yazılımın kaynak kodlarının kopyalanması,
+yetkisiz dağıtılması, parçalanması veya tersine mühendisliğe tabi tutulması
+(aşağıda belirtilen LGPL kapsamındaki dinamik kütüphaneler hariç) yasaktır.
+
+--------------------------------------------------------------------------------
+1. QT 6 FRAMEWORK LİSANS ATFI (GNU LGPLv3)
+--------------------------------------------------------------------------------
+Bu yazılım, The Qt Company Ltd. tarafından geliştirilen Qt 6 GUI, Ağ ve Multimedya
+(Qt6 Multimedia - QMediaRecorder, QMediaPlayer, QAudioInput) kütüphanelerini
+GNU Kısıtlı Genel Kamu Lisansı (GNU Lesser General Public License version 3 - LGPLv3)
+kapsamında dinamik olarak (.so / .dll formatında) bağlayarak kullanmaktadır.
+
+Lisans şartları uyarınca:
+- Qt 6 kütüphaneleri dinamik olarak linklenmiştir ve kaynak kodları değiştirilmemiştir.
+- Kullanıcılar, sistemlerindeki Qt kütüphanelerini dilediklerinde güncelleme veya
+  hata ayıklama amacıyla tersine mühendislik yapma yasal hakkına sahiptir.
+- LGPLv3 lisans metnine ve detaylarına https://www.gnu.org/licenses/lgpl-3.0.html
+  ve https://www.qt.io/licensing/ adreslerinden erişilebilir.
+
+--------------------------------------------------------------------------------
+2. OPENSSL TOOLKIT LİSANS ATFI (Apache License 2.0 / OpenSSL License)
+--------------------------------------------------------------------------------
+Bu ürün, OpenSSL Toolkit bünyesinde geliştirilen kriptografik ve TLS güvenlik
+yazılımlarını içermektedir.
+Telif Hakkı (c) 1998-2026 The OpenSSL Project. Tüm hakları saklıdır.
+Telif Hakkı (c) 1995-1998 Eric Young (eay@cryptsoft.com). Tüm hakları saklıdır.
+Lisans detayları: https://www.openssl.org/source/license.html
+
+--------------------------------------------------------------------------------
+3. GOOGLE PROTOCOL BUFFERS LİSANS ATFI (BSD 3-Clause License)
+--------------------------------------------------------------------------------
+Telif Hakkı (c) 2008 Google Inc. Tüm hakları saklıdır.
+Redistribution and use in source and binary forms, with or without modification,
+are permitted provided that the following conditions are met:
+1. Redistributions of source code must retain the above copyright notice.
+2. Redistributions in binary form must reproduce the above copyright notice.
+Lisans detayları: https://developers.google.com/protocol-buffers
+
+--------------------------------------------------------------------------------
+4. LIBSSH2 LİSANS ATFI (BSD 3-Clause License)
+--------------------------------------------------------------------------------
+Telif Hakkı (c) 2004-2026 Sara Golemon, Daniel Stenberg, Simon Josefsson ve katkıda bulunanlar.
+Tüm hakları saklıdır.
+Lisans detayları: https://www.libssh2.org/license.html
+
+--------------------------------------------------------------------------------
+5. LIBJPEG-TURBO LİSANS ATFI (BSD-Style / IJG License)
+--------------------------------------------------------------------------------
+Telif Hakkı (c) 2009-2026 D. R. Commander. Tüm hakları saklıdır.
+Telif Hakkı (c) 2015 Viktor Szathmáry. Tüm hakları saklıdır.
+Lisans detayları: https://libjpeg-turbo.org/About/License
+
+--------------------------------------------------------------------------------
+6. SQLITE VERİTABANI
+--------------------------------------------------------------------------------
+SQLite is in the Public Domain (Kamu Malı).
+https://www.sqlite.org/copyright.html
+
+--------------------------------------------------------------------------------
+7. AVAHI CLIENT / DAEMON (GNU LGPLv2.1+)
+--------------------------------------------------------------------------------
+Avahi mDNS/DNS-SD servisi dinamik kütüphane çağrısıyla kullanılmaktadır.
+Telif Hakkı (c) Lennart Poettering, Trent Lloyd.
+================================================================================

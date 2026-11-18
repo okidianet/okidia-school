@@ -1,0 +1,50 @@
+# AppArmor profile for OKIDIA Broker daemon
+# /etc/apparmor.d/usr.bin.okidia-broker
+
+abi <abi/3.0>,
+
+include <tunables/global>
+
+/usr/bin/okidia-broker flags=(attach_disconnected) {
+  include <abstractions/base>
+  include <abstractions/nameservice>
+  include <abstractions/openssl>
+
+  # İkili dosya ve kütüphaneler
+  /usr/bin/okidia-broker mr,
+  /usr/lib/@{multiarch}/** mr,
+  /lib/@{multiarch}/** mr,
+
+  # Yapılandırma ve çalışma dizinleri
+  /etc/okidia/ r,
+  /etc/okidia/** r,
+  /etc/okidia/config rw,
+
+  # Sertifikalar ve Özel Anahtarlar
+  /etc/okidia/certs/ r,
+  /etc/okidia/certs/broker/ r,
+  /etc/okidia/certs/broker/** rw,
+  /etc/okidia/certs/broker/*.crt r,
+  /etc/okidia/certs/broker/*.key rw,
+
+  # Veritabanı ve Çalışma Zamanı
+  /var/lib/okidia/ r,
+  /var/lib/okidia/** rwk,
+  /var/log/okidia/ r,
+  /var/log/okidia/** rwk,
+  /run/okidia/ r,
+  /run/okidia/** rwk,
+
+  # Geçici dosyalar
+  /tmp/** rw,
+
+  # Ağ Yetkileri (TCP TLS, UDP mDNS)
+  network inet stream,
+  network inet6 stream,
+  network inet dgram,
+  network inet6 dgram,
+  network netlink raw,
+
+  # Sinyal yönetimi
+  signal (receive, send) peer=/usr/bin/okidia-broker,
+}

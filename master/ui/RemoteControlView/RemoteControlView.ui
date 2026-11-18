@@ -1,0 +1,158 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<ui version="4.0">
+ <class>RemoteControlView</class>
+ <widget class="QWidget" name="RemoteControlView">
+  <property name="geometry">
+   <rect><x>0</x><y>0</y><width>1280</width><height>800</height></rect>
+  </property>
+  <property name="windowTitle"><string>Masaüstü — OKIDIA</string></property>
+  <property name="styleSheet">
+   <string>QWidget#RemoteControlView { background-color: palette(base); }</string>
+  </property>
+  <layout class="QVBoxLayout" name="mainLayout">
+   <property name="spacing"><number>0</number></property>
+   <property name="leftMargin"><number>0</number></property>
+   <property name="topMargin"><number>0</number></property>
+   <property name="rightMargin"><number>0</number></property>
+   <property name="bottomMargin"><number>0</number></property>
+   <item>
+    <widget class="QWidget" name="topBar">
+     <property name="maximumHeight"><number>40</number></property>
+     <property name="styleSheet">
+      <string>background-color: palette(alternate-base); border-bottom: 1px solid palette(mid);</string>
+     </property>
+     <layout class="QHBoxLayout" name="topBarLayout">
+      <property name="leftMargin"><number>12</number></property>
+      <property name="topMargin"><number>4</number></property>
+      <property name="rightMargin"><number>8</number></property>
+      <property name="bottomMargin"><number>4</number></property>
+      <item>
+       <widget class="QLabel" name="clientLabel">
+        <property name="text"><string>—</string></property>
+        <property name="styleSheet">
+         <string>color: palette(text); font-weight: bold; font-size: 12px;</string>
+        </property>
+       </widget>
+      </item>
+      <item>
+       <spacer>
+        <property name="orientation"><enum>Qt::Horizontal</enum></property>
+        <property name="sizeHint" stdset="0"><size><width>40</width><height>20</height></size></property>
+       </spacer>
+      </item>
+      <!-- Ekran Kaynağı Seçimi -->
+      <item>
+       <widget class="QComboBox" name="comboSource">
+        <property name="minimumWidth"><number>120</number></property>
+        <property name="styleSheet">
+         <string>QComboBox { background-color: palette(button); color: palette(button-text); border-radius: 4px; padding: 2px 8px; font-size: 11px; border: 1px solid palette(mid); }
+          QComboBox::drop-down { border: none; }
+          QComboBox QAbstractItemView { background-color: palette(base); color: palette(text); selection-background-color: palette(highlight); selection-color: palette(highlighted-text); border: 1px solid palette(mid); }</string>
+        </property>
+       </widget>
+      </item>
+      <!-- İstemci Girdi Kilidi -->
+      <item>
+       <widget class="QPushButton" name="btnLockAgentInput">
+        <property name="text"><string>Klavye-Fare Kilidi</string></property>
+        <property name="checkable"><bool>true</bool></property>
+        <property name="toolTip"><string>İstemci klavye ve faresini kilitler</string></property>
+        <property name="styleSheet">
+         <string>QPushButton { background-color: palette(button); color: palette(button-text); border-radius: 4px; padding: 4px 10px; font-size: 11px; border: 1px solid palette(mid); min-height: 20px; }
+          QPushButton:hover { background-color: palette(highlight); color: palette(highlighted-text); border-color: palette(highlight); }
+          QPushButton:checked { background-color: palette(highlight); color: palette(highlighted-text); border-color: palette(highlight); }</string>
+        </property>
+       </widget>
+      </item>
+      <!-- İzleme / Kontrol toggle -->
+      <item>
+       <widget class="QPushButton" name="btnViewOnly">
+        <property name="text"><string>İzleme</string></property>
+        <property name="checkable"><bool>true</bool></property>
+        <property name="styleSheet">
+         <string>QPushButton { background-color: palette(button); color: palette(button-text); border-radius: 4px; padding: 4px 10px; font-size: 11px; border: 1px solid palette(mid); min-height: 20px; }
+          QPushButton:hover { background-color: palette(highlight); color: palette(highlighted-text); border-color: palette(highlight); }
+          QPushButton:checked { background-color: palette(highlight); color: palette(highlighted-text); border-color: palette(highlight); font-weight: bold; }</string>
+        </property>
+       </widget>
+      </item>
+      <item>
+       <widget class="QPushButton" name="btnControl">
+        <property name="text"><string>Kontrol</string></property>
+        <property name="checkable"><bool>true</bool></property>
+        <property name="checked"><bool>true</bool></property>
+        <property name="styleSheet">
+         <string>QPushButton { background-color: palette(button); color: palette(button-text); border-radius: 4px; padding: 4px 10px; font-size: 11px; border: 1px solid palette(mid); min-height: 20px; }
+          QPushButton:hover { background-color: palette(highlight); color: palette(highlighted-text); border-color: palette(highlight); }
+          QPushButton:checked { background-color: palette(highlight); color: palette(highlighted-text); border-color: palette(highlight); font-weight: bold; }</string>
+        </property>
+       </widget>
+      </item>
+      <item>
+       <widget class="QPushButton" name="btnShortcuts">
+        <property name="text"><string>Kısayollar</string></property>
+        <property name="toolTip"><string>İstemciye sistem kısayolları ve özel tuşlar gönderir</string></property>
+        <property name="styleSheet">
+         <string>QPushButton { background-color: palette(button); color: palette(button-text); border-radius: 4px; padding: 4px 10px; font-size: 11px; border: 1px solid palette(mid); min-height: 20px; }
+          QPushButton:hover { background-color: palette(highlight); color: palette(highlighted-text); border-color: palette(highlight); }
+          QPushButton::menu-indicator { subcontrol-origin: padding; subcontrol-position: center right; right: 4px; }</string>
+        </property>
+       </widget>
+      </item>
+      <item>
+       <widget class="QPushButton" name="btnFileManager">
+        <property name="text"><string>Dosya Aktar</string></property>
+        <property name="styleSheet">
+         <string>QPushButton { background-color: palette(button); color: palette(button-text); border-radius: 4px; padding: 4px 10px; font-size: 11px; border: 1px solid palette(mid); min-height: 20px; }
+          QPushButton:hover { background-color: palette(highlight); color: palette(highlighted-text); border-color: palette(highlight); }</string>
+        </property>
+       </widget>
+      </item>
+      <item>
+       <widget class="QLabel" name="separatorLabel">
+        <property name="text"><string>  </string></property>
+       </widget>
+      </item>
+      <!-- F11 Tam Ekran butonu -->
+      <item>
+       <widget class="QPushButton" name="btnFullscreen">
+        <property name="text"><string>Tam Ekran</string></property>
+        <property name="styleSheet">
+         <string>QPushButton { background-color: palette(button); color: palette(button-text); border-radius: 4px; padding: 4px 10px; font-size: 11px; border: 1px solid palette(mid); min-height: 20px; }
+          QPushButton:hover { background-color: palette(highlight); color: palette(highlighted-text); border-color: palette(highlight); }</string>
+        </property>
+        <property name="toolTip"><string>F11</string></property>
+       </widget>
+      </item>
+      <!-- ESC Çıkış butonu -->
+      <item>
+       <widget class="QPushButton" name="btnStop">
+        <property name="text"><string>Çıkış</string></property>
+        <property name="styleSheet">
+         <string>QPushButton { background-color: palette(bright-text); color: palette(highlighted-text); font-weight: bold; border-radius: 4px; padding: 4px 10px; font-size: 11px; border: 1px solid palette(bright-text); min-height: 20px; }
+          QPushButton:hover { background-color: palette(window); color: palette(bright-text); border-color: palette(bright-text); }</string>
+        </property>
+        <property name="toolTip"><string>ESC</string></property>
+       </widget>
+      </item>
+     </layout>
+    </widget>
+   </item>
+   <item>
+    <widget class="QLabel" name="screenLabel">
+     <property name="sizePolicy">
+      <sizepolicy hsizetype="Expanding" vsizetype="Expanding">
+       <horstretch>1</horstretch>
+       <verstretch>1</verstretch>
+      </sizepolicy>
+     </property>
+     <property name="alignment"><set>Qt::AlignCenter</set></property>
+     <property name="text"><string/></property>
+     <property name="styleSheet"><string>background-color: #000000;</string></property>
+    </widget>
+   </item>
+  </layout>
+ </widget>
+ <resources/>
+ <connections/>
+</ui>

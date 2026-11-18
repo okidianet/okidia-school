@@ -1,0 +1,382 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<ui version="4.0">
+ <class>ReportPanel</class>
+ <widget class="QWidget" name="ReportPanel">
+  <property name="geometry">
+   <rect>
+    <x>0</x>
+    <y>0</y>
+    <width>1040</width>
+    <height>660</height>
+   </rect>
+  </property>
+  <property name="windowTitle">
+   <string>Raporlama ve Denetim Panosu — OKIDIA</string>
+  </property>
+  <layout class="QVBoxLayout" name="mainLayout">
+   <property name="spacing">
+    <number>8</number>
+   </property>
+   <property name="leftMargin">
+    <number>12</number>
+   </property>
+   <property name="topMargin">
+    <number>12</number>
+   </property>
+   <property name="rightMargin">
+    <number>12</number>
+   </property>
+   <property name="bottomMargin">
+    <number>12</number>
+   </property>
+
+   <!-- Üst Filtre Satırı 1: Zaman ve Kategori -->
+   <item>
+    <layout class="QHBoxLayout" name="filterRow1">
+     <property name="spacing">
+      <number>8</number>
+     </property>
+     <item>
+      <widget class="QLabel" name="lblQuickRange">
+       <property name="text">
+        <string>Aralık:</string>
+       </property>
+      </widget>
+     </item>
+     <item>
+      <widget class="QComboBox" name="quickRangeCombo">
+       <item><property name="text"><string>Son 24 Saat</string></property></item>
+       <item><property name="text"><string>Bugün</string></property></item>
+       <item><property name="text"><string>Dün</string></property></item>
+       <item><property name="text"><string>Bu Hafta</string></property></item>
+       <item><property name="text"><string>Bu Ay</string></property></item>
+       <item><property name="text"><string>Özel Aralık</string></property></item>
+      </widget>
+     </item>
+     <item>
+      <widget class="QLabel" name="lblFrom">
+       <property name="text">
+        <string>Başlangıç:</string>
+       </property>
+      </widget>
+     </item>
+     <item>
+      <widget class="QDateTimeEdit" name="fromEdit">
+       <property name="displayFormat">
+        <string>dd.MM.yyyy HH:mm</string>
+       </property>
+       <property name="calendarPopup">
+        <bool>true</bool>
+       </property>
+      </widget>
+     </item>
+     <item>
+      <widget class="QLabel" name="lblTo">
+       <property name="text">
+        <string>Bitiş:</string>
+       </property>
+      </widget>
+     </item>
+     <item>
+      <widget class="QDateTimeEdit" name="toEdit">
+       <property name="displayFormat">
+        <string>dd.MM.yyyy HH:mm</string>
+       </property>
+       <property name="calendarPopup">
+        <bool>true</bool>
+       </property>
+      </widget>
+     </item>
+     <item>
+      <widget class="QLabel" name="lblCategory">
+       <property name="text">
+        <string>Kategori:</string>
+       </property>
+      </widget>
+     </item>
+     <item>
+      <widget class="QComboBox" name="categoryCombo">
+       <item><property name="text"><string>Tümü</string></property></item>
+       <item><property name="text"><string>Kimlik Doğrulama</string></property></item>
+       <item><property name="text"><string>Komutlar</string></property></item>
+       <item><property name="text"><string>Dosya &amp; Anons</string></property></item>
+       <item><property name="text"><string>Sohbet</string></property></item>
+       <item><property name="text"><string>Sistem</string></property></item>
+       <item><property name="text"><string>Güvenlik &amp; Kilit</string></property></item>
+       <item><property name="text"><string>Güç &amp; WOL</string></property></item>
+       <item><property name="text"><string>Dağıtım &amp; OTA</string></property></item>
+       <item><property name="text"><string>Sınav Yönetimi</string></property></item>
+      </widget>
+     </item>
+     <item>
+      <spacer name="spacer1">
+       <property name="orientation">
+        <enum>Qt::Horizontal</enum>
+       </property>
+       <property name="sizeHint" stdset="0">
+        <size>
+         <width>20</width>
+         <height>20</height>
+        </size>
+       </property>
+      </spacer>
+     </item>
+    </layout>
+   </item>
+
+   <!-- Üst Filtre Satırı 2: Arama ve Butonlar -->
+   <item>
+    <layout class="QHBoxLayout" name="filterRow2">
+     <property name="spacing">
+      <number>8</number>
+     </property>
+     <item>
+      <widget class="QLabel" name="lblSearch">
+       <property name="text">
+        <string>Arama:</string>
+       </property>
+      </widget>
+     </item>
+     <item>
+      <widget class="QLineEdit" name="searchEdit">
+       <property name="placeholderText">
+        <string>Aktör, hedef veya detay içinde ara...</string>
+       </property>
+       <property name="clearButtonEnabled">
+        <bool>true</bool>
+       </property>
+      </widget>
+     </item>
+     <item>
+      <widget class="QPushButton" name="btnFilter">
+       <property name="text">
+        <string>Filtrele</string>
+       </property>
+      </widget>
+     </item>
+     <item>
+      <widget class="QPushButton" name="btnReset">
+       <property name="text">
+        <string>Sıfırla</string>
+       </property>
+      </widget>
+     </item>
+     <item>
+      <spacer name="spacer2">
+       <property name="orientation">
+        <enum>Qt::Horizontal</enum>
+       </property>
+       <property name="sizeHint" stdset="0">
+        <size>
+         <width>30</width>
+         <height>20</height>
+        </size>
+       </property>
+      </spacer>
+     </item>
+     <item>
+      <widget class="QPushButton" name="btnExportCsv">
+       <property name="text">
+        <string>CSV / Excel</string>
+       </property>
+      </widget>
+     </item>
+     <item>
+      <widget class="QPushButton" name="btnExportPdf">
+       <property name="text">
+        <string>PDF Raporu</string>
+       </property>
+      </widget>
+     </item>
+     <item>
+      <widget class="QPushButton" name="btnExportHtml">
+       <property name="text">
+        <string>HTML Raporu</string>
+       </property>
+      </widget>
+     </item>
+    </layout>
+   </item>
+
+   <!-- Olay Tablosu -->
+   <item>
+    <widget class="QTableWidget" name="eventTable">
+     <property name="columnCount">
+      <number>5</number>
+     </property>
+     <property name="selectionBehavior">
+      <enum>QAbstractItemView::SelectRows</enum>
+     </property>
+     <property name="alternatingRowColors">
+      <bool>true</bool>
+     </property>
+     <property name="sortingEnabled">
+      <bool>true</bool>
+     </property>
+     <attribute name="horizontalHeaderCascadingSectionResizes">
+      <bool>true</bool>
+     </attribute>
+     <column>
+      <property name="text">
+       <string>Zaman</string>
+      </property>
+     </column>
+     <column>
+      <property name="text">
+       <string>Kategori</string>
+      </property>
+     </column>
+     <column>
+      <property name="text">
+       <string>Aktör</string>
+      </property>
+     </column>
+     <column>
+      <property name="text">
+       <string>Hedef</string>
+      </property>
+     </column>
+     <column>
+      <property name="text">
+       <string>Açıklama</string>
+      </property>
+     </column>
+    </widget>
+   </item>
+
+   <!-- Sayfalama ve Durum Satırı -->
+   <item>
+    <layout class="QHBoxLayout" name="paginationLayout">
+     <property name="spacing">
+      <number>6</number>
+     </property>
+     <item>
+      <widget class="QPushButton" name="btnFirstPage">
+       <property name="text">
+        <string>«</string>
+       </property>
+       <property name="toolTip">
+        <string>İlk Sayfa</string>
+       </property>
+       <property name="maximumSize">
+        <size>
+         <width>32</width>
+         <height>28</height>
+        </size>
+       </property>
+      </widget>
+     </item>
+     <item>
+      <widget class="QPushButton" name="btnPrevPage">
+       <property name="text">
+        <string>‹</string>
+       </property>
+       <property name="toolTip">
+        <string>Önceki Sayfa</string>
+       </property>
+       <property name="maximumSize">
+        <size>
+         <width>32</width>
+         <height>28</height>
+        </size>
+       </property>
+      </widget>
+     </item>
+     <item>
+      <widget class="QLabel" name="pageLabel">
+       <property name="text">
+        <string>Sayfa 1 / 1 (0 kayıt)</string>
+       </property>
+       <property name="styleSheet">
+        <string>font-weight: 500;</string>
+       </property>
+      </widget>
+     </item>
+     <item>
+      <widget class="QPushButton" name="btnNextPage">
+       <property name="text">
+        <string>›</string>
+       </property>
+       <property name="toolTip">
+        <string>Sonraki Sayfa</string>
+       </property>
+       <property name="maximumSize">
+        <size>
+         <width>32</width>
+         <height>28</height>
+        </size>
+       </property>
+      </widget>
+     </item>
+     <item>
+      <widget class="QPushButton" name="btnLastPage">
+       <property name="text">
+        <string>»</string>
+       </property>
+       <property name="toolTip">
+        <string>Son Sayfa</string>
+       </property>
+       <property name="maximumSize">
+        <size>
+         <width>32</width>
+         <height>28</height>
+        </size>
+       </property>
+      </widget>
+     </item>
+     <item>
+      <widget class="QLabel" name="lblPageSize">
+       <property name="text">
+        <string>Sayfa Başına:</string>
+       </property>
+      </widget>
+     </item>
+     <item>
+      <widget class="QComboBox" name="pageSizeCombo">
+       <item><property name="text"><string>50</string></property></item>
+       <item><property name="text"><string>100</string></property></item>
+       <item><property name="text"><string>200</string></property></item>
+       <item><property name="text"><string>500</string></property></item>
+      </widget>
+     </item>
+     <item>
+      <spacer name="spacer3">
+       <property name="orientation">
+        <enum>Qt::Horizontal</enum>
+       </property>
+       <property name="sizeHint" stdset="0">
+        <size>
+         <width>40</width>
+         <height>20</height>
+        </size>
+       </property>
+      </spacer>
+     </item>
+     <item>
+      <widget class="QLabel" name="statusLabel">
+       <property name="text">
+        <string>Hazır</string>
+       </property>
+       <property name="styleSheet">
+        <string>color: #888; font-size: 11px;</string>
+       </property>
+      </widget>
+     </item>
+     <item>
+      <widget class="QLabel" name="dbPathLabel">
+       <property name="text">
+        <string>Sunucu: Merkezi Broker</string>
+       </property>
+       <property name="styleSheet">
+        <string>color: #888; font-size: 11px;</string>
+       </property>
+      </widget>
+     </item>
+    </layout>
+   </item>
+
+  </layout>
+ </widget>
+ <resources/>
+ <connections/>
+</ui>

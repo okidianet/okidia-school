@@ -1,0 +1,12 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=OKIDIA Broker
+GenericName=Ağ Yönlendirme Servisi
+Comment=OKIDIA ağ yönlendirme servisi — normalde systemd tarafından yönetilir
+Exec=okidia-broker
+Icon=okidia-broker
+Terminal=true
+Categories=System;Network;
+Keywords=okidia;broker;servis;
+NoDisplay=true

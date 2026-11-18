@@ -1,0 +1,66 @@
+# Build dizinleri
+build/
+build-*/
+cmake-build-*/
+
+.cache/ 
+
+# Qt Creator
+*.pro.user
+*.qmlproject.user
+.qmake.stash
+
+# Derleme çıktıları
+*.o
+*.a
+*.so
+*.exe
+*.qm
+moc_*.cpp
+ui_*.h
+qrc_*.cpp
+
+# VS Code (yalnizca settings.json ve tasks.json kalabilir)
+.vscode/*
+!.vscode/settings.json
+!.vscode/tasks.json
+
+# Geçici dosyalar
+*.swp
+*.swo
+*~
+*.DS_Store
+Thumbs.db
+__pycache__/
+*.pyc
+
+# Sertifikalar ve hassas veriler (KESİNLİKLE repoya girmesin)
+*.key
+*.pem
+*.p12
+*.pfx
+config/local.ini
+certs/
+
+# Web Portalı (Test cihazlarına gereksiz indirme yapılmaması için)
+okidia-net/
+web/downloads/**/*.deb
+web/downloads/**/*.exe
+web/data/.hash_cache.json
+web/_old_backup/
+
+
+
+# Mobil Uygulama Bağımlılıkları ve Çıktıları
+mobile-app/node_modules/
+mobile-app/.expo/
+mobile-app/dist/
+mobile-app/.eas/
+
+# Geliştirme ve Taslak Planları (Git commit sayısını ve versiyonu etkilememesi için)
+plans/
+
+# Graphify Bilgi Grafı (Yalnızca yerel geliştirme makinesinde tutulması için)
+graphify-out/
+
+

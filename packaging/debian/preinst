@@ -1,0 +1,161 @@
+#!/bin/bash
+# preinst — OKIDIA kurulum öncesi denetimler / Pre-installation checks
+
+PACKAGE="${DPKG_MAINTSCRIPT_PACKAGE:-unknown}"
+
+# ── Sistem Dili Tespiti (Language Detection) ───────────────────
+LANG_ENV="${LC_ALL:-${LC_MESSAGES:-${LANG:-en}}}"
+IS_TR=0
+if [[ "$LANG_ENV" =~ ^tr || "$LANG_ENV" =~ ^TR ]]; then
+    IS_TR=1
+fi
+
+# Check if we are running in a bulk dpkg/apt install that contains conflicting okidia packages
+check_bulk_conflict() {
+    local pid=$$
+    # Go up the process tree up to 3 levels to check cmdlines of dpkg, apt, apt-get, etc.
+    for i in {1..3}; do
+        if [ -n "$pid" ] && [ "$pid" -ne 0 ] && [ -f "/proc/$pid/status" ]; then
+            local ppid=$(grep -i PPid "/proc/$pid/status" | awk '{print $2}')
+            if [ -n "$ppid" ] && [ -f "/proc/$ppid/cmdline" ]; then
+                local has_agent=0
+                local has_master_or_broker=0
+                
+                while IFS= read -r -d '' arg; do
+                    local filename
+                    filename=$(basename -- "$arg")
+                    if [[ "$filename" == "okidia-agent" ]] || [[ "$filename" == okidia-agent_* ]] || [[ "$filename" == okidia-agent.* ]]; then
+                        has_agent=1
+                    elif [[ "$filename" == "okidia-master" ]] || [[ "$filename" == okidia-master_* ]] || [[ "$filename" == okidia-master.* ]] || \
+                         [[ "$filename" == "okidia-broker" ]] || [[ "$filename" == okidia-broker_* ]] || [[ "$filename" == okidia-broker.* ]]; then
+                        has_master_or_broker=1
+                    fi
+                done < "/proc/$ppid/cmdline"
+                
+                if [ "$has_agent" -eq 1 ] && [ "$has_master_or_broker" -eq 1 ]; then
+                    return 0 # Bulk conflict detected!
+                fi
+            fi
+            pid=$ppid
+        else
+            break
+        fi
+    done
+    return 1 # No bulk conflict detected in cmdline
+}
+
+# Toplu kurulum çakışma kontrolü (Bulk Conflict Check)
+if check_bulk_conflict; then
+    echo -e "\e[1;31m"
+    echo -e "=============================================================="
+    if [ "$IS_TR" -eq 1 ]; then
+        echo -e "OKIDIA KURULUM HATASI: TOPLU KURULUM ENGELLENDİ!"
+        echo -e "=============================================================="
+        echo -e "\e[0m"
+        echo -e "Aynı anda hem Ajan (Öğrenci) hem de Yönetici (Master) / Sunucu (Broker)"
+        echo -e "paketlerini kurmaya çalışıyorsunuz."
+        echo -e "Okidia mimarisinde bir bilgisayar sadece tek bir role sahip olabilir:"
+        echo -e "  1. \e[1mÖğrenci Bilgisayarı\e[0m: Sadece \e[1;32mokidia-agent\e[0m kurulmalıdır."
+        echo -e "  2. \e[1mÖğretmen Bilgisayarı\e[0m: Sadece \e[1;32mokidia-master\e[0m kurulmalıdır."
+        echo -e "  3. \e[1mOkul Sunucusu (Broker)\e[0m: Sadece \e[1;32mokidia-broker\e[0m kurulmalıdır."
+        echo -e ""
+        echo -e "\e[1;33mİpucu:\e[0m Muhtemelen \e[1msudo dpkg -i *.deb\e[0m komutunu kullandınız veya tüm paketleri"
+        echo -e "aynı anda parametre olarak geçtiniz. Lütfen bu makine için yalnızca ihtiyacınız olan"
+        echo -e "tek bir paketi seçerek kurun."
+        echo -e ""
+        echo -e "Örnek (Öğrenci bilgisayarı için):"
+        echo -e "   \e[1;32msudo dpkg -i okidia-agent_*.deb\e[0m"
+        echo -e ""
+        echo -e "Örnek (Öğretmen bilgisayarı için):"
+        echo -e "   \e[1;32msudo dpkg -i okidia-master_*.deb\e[0m"
+    else
+        echo -e "OKIDIA INSTALL ERROR: BATCH INSTALLATION PREVENTED!"
+        echo -e "=============================================================="
+        echo -e "\e[0m"
+        echo -e "You are attempting to install both Agent (Student) and Master/Broker packages"
+        echo -e "simultaneously on the same machine."
+        echo -e "In Okidia architecture, a computer can only have a single role:"
+        echo -e "  1. \e[1mStudent Machine\e[0m: Only install \e[1;32mokidia-agent\e[0m."
+        echo -e "  2. \e[1mTeacher Machine\e[0m: Only install \e[1;32mokidia-master\e[0m."
+        echo -e "  3. \e[1mSchool Server (Broker)\e[0m: Only install \e[1;32mokidia-broker\e[0m."
+        echo -e ""
+        echo -e "\e[1;33mHint:\e[0m You likely ran \e[1msudo dpkg -i *.deb\e[0m or supplied all packages at once."
+        echo -e "Please install only the specific package needed for this machine."
+        echo -e ""
+        echo -e "Example (For Student computer):"
+        echo -e "   \e[1;32msudo dpkg -i okidia-agent_*.deb\e[0m"
+        echo -e ""
+        echo -e "Example (For Teacher computer):"
+        echo -e "   \e[1;32msudo dpkg -i okidia-master_*.deb\e[0m"
+    fi
+    echo -e ""
+    exit 1
+fi
+
+if [ "$PACKAGE" = "okidia-agent" ]; then
+    if dpkg -s okidia-master &>/dev/null || dpkg -s okidia-broker &>/dev/null; then
+        echo -e "\e[1;31m"
+        echo -e "=============================================================="
+        if [ "$IS_TR" -eq 1 ]; then
+            echo -e "OKIDIA KURULUM HATASI: ROL ÇAKIŞMASI TESPİT EDİLDİ!"
+            echo -e "=============================================================="
+            echo -e "\e[0m"
+            echo -e "Bu bilgisayarda zaten \e[1mOKIDIA Master (Öğretmen)\e[0m veya \e[1mOKIDIA Broker (Sunucu)\e[0m kurulu."
+            echo -e "Aynı bilgisayara hem Ajan (Öğrenci) hem de Yönetim/Sunucu rolleri kurulamaz."
+            echo -e ""
+            echo -e "Eğer bu bilgisayarı Öğrenci bilgisayarı (Ajan) yapmak istiyorsanız,"
+            echo -e "öncelikle mevcut master veya broker paketlerini kaldırmalısınız:"
+            echo -e "   \e[1;32msudo apt purge okidia-master okidia-broker\e[0m"
+        else
+            echo -e "OKIDIA INSTALL ERROR: ROLE CONFLICT DETECTED!"
+            echo -e "=============================================================="
+            echo -e "\e[0m"
+            echo -e "This computer already has \e[1mOKIDIA Master (Teacher)\e[0m or \e[1mOKIDIA Broker (Server)\e[0m installed."
+            echo -e "An Agent (Student) and Master/Broker roles cannot coexist on the same computer."
+            echo -e ""
+            echo -e "If you want to configure this computer as an Agent (Student),"
+            echo -e "you must first remove the existing master or broker packages:"
+            echo -e "   \e[1;32msudo apt purge okidia-master okidia-broker\e[0m"
+        fi
+        echo -e ""
+        exit 1
+    fi
+fi
+
+if [ "$PACKAGE" = "okidia-master" ] || [ "$PACKAGE" = "okidia-broker" ]; then
+    if dpkg -s okidia-agent &>/dev/null; then
+        echo -e "\e[1;31m"
+        echo -e "=============================================================="
+        if [ "$IS_TR" -eq 1 ]; then
+            echo -e "OKIDIA KURULUM HATASI: ROL ÇAKIŞMASI TESPİT EDİLDİ!"
+            echo -e "=============================================================="
+            echo -e "\e[0m"
+            echo -e "Bu bilgisayarda zaten \e[1mOKIDIA Agent (Öğrenci)\e[0m kurulu."
+            echo -e "Aynı bilgisayara hem Ajan hem de Master (Öğretmen) veya Broker (Sunucu) kurulamaz."
+            echo -e ""
+            echo -e "\e[1;33mİpucu:\e[0m Eğer yanlışlıkla \e[1msudo dpkg -i *.deb\e[0m yazdıysanız, bu komut alfabetik sırayla"
+            echo -e "önce Ajanı kurmuş, ardından bu pakete geçince çakışma hatası üretmiştir."
+            echo -e ""
+            echo -e "Lütfen kurulum kılavuzuna uyarak bu makine için gereken tek bir paketi kurun."
+            echo -e "Eğer bu makineyi Öğretmen/Sunucu yapmak istiyorsanız, önce kurulu ajanı kaldırın:"
+            echo -e "   \e[1;32msudo apt purge okidia-agent\e[0m"
+        else
+            echo -e "OKIDIA INSTALL ERROR: ROLE CONFLICT DETECTED!"
+            echo -e "=============================================================="
+            echo -e "\e[0m"
+            echo -e "This computer already has \e[1mOKIDIA Agent (Student)\e[0m installed."
+            echo -e "An Agent and Master (Teacher) or Broker (Server) cannot coexist on the same computer."
+            echo -e ""
+            echo -e "\e[1;33mHint:\e[0m If you ran \e[1msudo dpkg -i *.deb\e[0m, it installed the Agent first"
+            echo -e "and then produced a conflict error when reaching this package."
+            echo -e ""
+            echo -e "Please install only the single package needed for this machine."
+            echo -e "If this machine is intended to be a Teacher/Server, purge the existing agent first:"
+            echo -e "   \e[1;32msudo apt purge okidia-agent\e[0m"
+        fi
+        echo -e ""
+        exit 1
+    fi
+fi
+
+exit 0

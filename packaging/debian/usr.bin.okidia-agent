@@ -1,0 +1,57 @@
+# AppArmor profile for OKIDIA Agent daemon
+# /etc/apparmor.d/usr.bin.okidia-agent
+
+abi <abi/3.0>,
+
+include <tunables/global>
+
+/usr/bin/okidia-agent flags=(attach_disconnected) {
+  include <abstractions/base>
+  include <abstractions/nameservice>
+  include <abstractions/openssl>
+
+  # İkili dosya ve kütüphaneler
+  /usr/bin/okidia-agent mr,
+  /usr/lib/@{multiarch}/** mr,
+  /lib/@{multiarch}/** mr,
+
+  # Yapılandırma ve çalışma dizinleri
+  /etc/okidia/ r,
+  /etc/okidia/** r,
+  /etc/okidia/config rw,
+  /etc/okidia/installed_mac rw,
+  /etc/machine-id r,
+  /var/lib/dbus/machine-id r,
+
+  # Sertifikalar ve Özel Anahtarlar
+  /etc/okidia/certs/ r,
+  /etc/okidia/certs/agent/ r,
+  /etc/okidia/certs/agent/** rw,
+  /etc/okidia/certs/agent/*.crt rw,
+  /etc/okidia/certs/agent/*.key rw,
+
+  # Çalışma Zamanı, Veritabanı ve Loglar
+  /var/lib/okidia/ r,
+  /var/lib/okidia/** rwk,
+  /var/log/okidia/ r,
+  /var/log/okidia/** rwk,
+  /run/okidia/ r,
+  /run/okidia/** rwk,
+
+  # Geçici dosyalar
+  /tmp/** rw,
+
+  # Sistem metrikleri okuma
+  /proc/** r,
+  /sys/** r,
+
+  # Ağ Yetkileri (TCP TLS istemci, UDP mDNS)
+  network inet stream,
+  network inet6 stream,
+  network inet dgram,
+  network inet6 dgram,
+  network netlink raw,
+
+  # Sinyal yönetimi
+  signal (receive, send) peer=/usr/bin/okidia-agent,
+}

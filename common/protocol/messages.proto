@@ -1,0 +1,1571 @@
+syntax = "proto3";
+package okidia;
+
+// Mesaj tipleri
+enum MessageType {
+    UNKNOWN                = 0;
+    // 1-3 rezerve (eski handshake; artık kullanılmıyor — TLS/mTLS bunu karşılıyor)
+    SCREEN_FRAME           = 10;
+    SCREEN_TILE_UPDATE     = 11;
+    SCREEN_LOCK            = 12;
+    SCREEN_UNLOCK          = 13;
+    // 14 rezerve (eski SCREEN_BROADCAST; BROADCAST_BEGIN/FRAME/END ile değiştirildi)
+    SCREEN_CAPTURE         = 15;
+    SCREEN_CAPTURE_RESULT  = 16;
+    SCREEN_SELECT          = 17;   // Master → Agent: hangi ekranı izleyeceğini seç
+    SCREEN_INFO_REQUEST    = 18;   // Master → Agent: monitör listesini iste
+    SCREEN_INFO_RESPONSE   = 19;   // Agent  → Master: monitör listesini gönder
+
+    INPUT_LOCK             = 20;
+    INPUT_UNLOCK           = 21;
+    MOUSE_EVENT            = 22;
+    KEY_EVENT              = 23;
+    INPUT_TAKE_CONTROL     = 24;
+    REMOTE_CONTROL_STOP    = 25;
+    REMOTE_FRAME           = 26;  // Agent → Master: uzak kontrol görüntüsü
+    SCREEN_FPS_SET         = 27;  // Master → Agent: thumbnail hızı (interval_ms)
+    REMOTE_CONTROL_REQUEST = 28;  // Master → Agent: İzleme/Kontrol isteği
+    REMOTE_CONTROL_RESPONSE = 29; // Agent → Master: İstek onayı/reddi
+    SCREEN_STREAM_PAUSE    = 276; // Master/Broker → Agent: Ekran akışını duraklat (timer stop)
+
+    COMMAND_EXEC        = 30;
+    COMMAND_RESULT      = 31;
+
+    // SSH Kimlik Yönetimi
+    SSH_CRED_LIST       = 32;
+    SSH_CRED_LIST_RES   = 33;
+    SSH_CRED_ADD        = 34;
+    SSH_CRED_DEL        = 35;
+
+    // OTA Bildirimleri (Broker -> Master)
+    OTA_BROKER_REPORT    = 275;
+    
+    // Sistem Mesajları (Sürekli akış)
+    SYSTEM_METRICS_REPORT = 36; // Agent -> Broker -> Master
+    METRICS_STREAM_START  = 37; // Master -> Broker -> Agent
+    METRICS_STREAM_STOP   = 38; // Master -> Broker -> Agent
+    POWER_SHUTDOWN      = 40;
+    POWER_RESTART       = 41;
+    POWER_LOGOUT        = 42;
+    POWER_HIBERNATE     = 43;
+    POWER_WAKE_ON_LAN   = 44;
+
+    FILE_TRANSFER_BEGIN = 50;
+    FILE_TRANSFER_CHUNK = 51;
+    FILE_TRANSFER_END   = 52;
+
+    AUDIO_BROADCAST     = 60;
+    AUDIO_STOP          = 61;
+    AUDIO_MUTE          = 62;
+    AUDIO_UNMUTE        = 63;  // unmute + kaydedilen seviyeye dön
+    AUDIO_SET_VOLUME    = 64;
+    AUDIO_BROADCAST_LIVE= 65;
+    AUDIO_BROADCAST_FILE= 66;
+    AUDIO_BROADCAST_STOP= 67;
+    AUDIO_UNMUTE_ONLY   = 68;  // sadece unmute, volume değiştirmez
+    AUDIO_PLAY_LOCAL    = 69;  // agent'ta yerel dosyaları playlist olarak çal
+
+    CHAT_MESSAGE        = 70;
+    // 71 rezerve (eski CHAT_ROOM; yeni yapıda CHAT_ROOM_CREATED=175 ile değiştirildi)
+
+    EXAM_START          = 80;
+    EXAM_COLLECT        = 81;
+    EXAM_END            = 82;
+
+    HEARTBEAT           = 90;
+    REFRESH_REQUEST     = 199;  // Master → Agent: CLIENT_INFO + full frame gönder
+    CLIENT_INFO         = 91;
+
+    REPORT_EVENT        = 100;
+
+    MSG_POPUP           = 110;
+    MSG_BROADCAST       = 111;
+
+    APP_LIST_REQUEST    = 119;
+    APP_LIST_RESPONSE   = 118;
+    APP_OPEN            = 120;
+    APP_CLOSE           = 121;
+    APP_BLOCK_BYNAME    = 122;
+    APP_BLOCK_BYHASH    = 123;
+    APP_WHITELIST_SET   = 124;
+    APP_UNBLOCK         = 125;
+    APP_BLOCK_LIST      = 126;
+
+    HAND_RAISE          = 130;
+    HAND_LOWER          = 131;
+
+    BROADCAST_BEGIN     = 140;
+    BROADCAST_FRAME     = 141;
+    BROADCAST_END       = 142;
+
+    WEB_BLOCK_ALL       = 150;
+    WEB_BLOCK_DOMAINS   = 151;
+    WEB_UNBLOCK         = 152;
+
+    SCHEDULE_COMMAND    = 160;
+
+    // ── Zaman Senkronizasyonu & Donanım Sağlığı ───────────────────
+    TIME_SYNC_REQUEST   = 165;  // Agent/Master → Broker: UTC zamanı isteği
+    TIME_SYNC_RESPONSE  = 166;  // Broker → Agent/Master: sunucu UTC zamanı
+    BROKER_TIME_WARNING = 167;  // Broker → Master: Broker BIOS pili/desync uyarısı
+    CLIENT_HARDWARE_ALERT = 168;// Broker → Master: Agent BIOS pili arıza bildirimi
+    BROKER_STORAGE_WARNING = 169; // Broker → Master: Broker disk yetersizliği / yedekleme hatası uyarısı
+
+    // ── Sertifika onay akışı ──────────────────────────────────────
+    DISCOVERY_REQUEST   = 180;  // Agent → Broker → Master: sertifika isteği
+    CERT_PROVISION      = 181;  // Master → Agent: imzalı sertifika
+    DISCOVERY_IGNORE    = 182;  // Master → Broker: bu machine-id'yi yoksay
+    CLIENT_REVOKE       = 183;  // Master → Broker → Agent: sertifikayı sil
+    DISCOVERY_REJECT    = 184;  // Master → Broker: bu isteği reddet (kalıcı değil)
+    SETUP_REQUEST       = 185;  // Master → Broker: ilk kurulum sertifika isteği
+    SETUP_RESPONSE      = 186;  // Broker → Master: imzalı sertifika + CA
+    DISCOVERY_APPROVE   = 187;  // Master → Broker: bu isteği onayla (broker imzalar)
+    BROKER_STATUS       = 188;  // Broker servis → Broker tray: durum güncellemesi
+    BROKER_CMD          = 189;  // Broker tray → Broker servis: komut (stop vb.)
+    DISCOVERY_RESOLVED_BROADCAST = 266; // Broker → Master: İstemci onaylandı/reddedildi/yoksayıldı yayını
+    
+    JOIN_REQUEST        = 220;  // OM → Broker: katılım kodu ile sertifika isteği
+    JOIN_RESPONSE       = 221;  // Broker → OM: imzalı sertifika + CA
+    JOIN_CODE_REQUEST   = 222;  // Master → Broker: bir kullanıcı için kod üret
+    JOIN_CODE_RESPONSE  = 223;  // Broker → Master: üretilen kod
+
+    CHAT_LIST_REQUEST   = 170;
+    CHAT_LIST_RESPONSE  = 171;
+    CHAT_INVITE         = 172;
+    CHAT_INVITE_ACCEPT  = 173;
+    CHAT_INVITE_REJECT  = 174;
+    CHAT_ROOM_CREATED   = 175;
+    CHAT_ADD_MEMBER     = 176;
+    CHAT_LEAVE          = 177;
+    CHAT_MEMBER_JOINED  = 178;
+    CHAT_MEMBER_LEFT    = 179;
+
+    // Özel sohbet
+    PRIVATE_CHAT_REQUEST = 190;  // Agent/Master → Broker → karşı taraf: istek
+    PRIVATE_CHAT_ACCEPT  = 191;  // Kabul
+    PRIVATE_CHAT_REJECT  = 192;  // Ret (cooldown_seconds ile)
+    PRIVATE_CHAT_OPEN    = 193;  // YM/OM → Agent: onaysız aç
+    PRIVATE_CHAT_MESSAGE = 194;  // İki taraf arasında mesaj
+    PRIVATE_CHAT_CLOSE   = 195;  // Oturum kapandı
+
+    // Agent pencere durumu
+    CHAT_WINDOW_STATE    = 196;  // Agent → Broker → Master: pencere açık/kapalı
+    CHAT_LOCK_STATE      = 197;  // Master → Broker → Sınıf agent'ları: kilit durumu
+    AGENT_TYPE_SET       = 198;  // Master → Broker → Agent: tip ata
+    AGENT_TYPE_SET_RESULT = 200; // Agent → Broker → Master: onay sonucu
+    AGENT_STATUS          = 201; // Agent servis → Tray: Broker bağlantı durumu
+    CURSOR_SHAPE_CHANGE   = 202; // Agent → Master: fare imleci değişti
+    AGENT_LOCK_STATUS_BROADCAST = 203;
+    ROOM_JOIN_REQUEST     = 204;  // OM → Broker → Sınıf Sahibi/YM: Sınıf sohbetine katılım izni isteği
+    ROOM_JOIN_RESPONSE    = 205;  // Sınıf Sahibi/YM → Broker → OM: Katılım izni cevabı
+    AGENT_ALIAS_SET       = 206;  // Master → Broker → Agent: takma ad / sınıf adı ata
+    AGENT_POLICY_SET      = 207;  // Master → Broker → Agent: sistem politikaları (switch-user kısıtlaması vb.)
+
+    BROKER_SETTINGS_UPDATE = 210; // Master → Broker: ayar güncelle (retention vb)
+    VERIFY_SETUP_CODE_REQUEST = 215;
+    VERIFY_SETUP_CODE_RESPONSE = 216;
+    DB_BACKUP_REQUEST      = 211; // Master → Broker: veritabanı yedeği iste
+    DB_BACKUP_RESPONSE     = 212; // Broker → Master: şifreli veritabanı verisi
+    DB_RESTORE_REQUEST     = 213; // Master → Broker: şifreli veritabanı yedeği gönder
+    DB_RESTORE_RESPONSE    = 214; // Broker → Master: geri yükleme sonucu
+    BACKUP_REPLICA_PUSH    = 217; // Broker → Master: ikincil yedek replikasyonu kopyası
+    DB_USER_SET_REPLICA_REQ = 218; // Master → Broker: kullanıcıya ikincil yedek replikasyon yetkisi ver/al
+    DB_USER_SET_REPLICA_RES = 219; // Broker → Master: replikasyon yetkisi sonucu
+    BACKUP_REPLICA_CHECK   = 224; // Broker → Master: son replika yedeği bilgisi (anons)
+    BACKUP_REPLICA_PULL    = 225; // Master → Broker: replika yedeğini parça parça çekme isteği
+
+    // ── Ağ Login ve Otomatik Sertifika (230+) ───────────────────────────
+    LOGIN_REQUEST          = 230; // Master → Broker: şifreyle giriş
+    LOGIN_RESPONSE         = 231; // Broker → Master: giriş sonucu
+    ENROLL_REQUEST         = 232; // Master → Broker: giriş sonrası sertifika isteği
+    ENROLL_RESPONSE        = 233; // Broker → Master: imzalı sertifika
+    SET_RECOVERY_KEY_REQ   = 234; // Master → Broker: kurtarma kodu hash'i
+    PASSWORD_RESET_REQ     = 235; // Master → Broker: kurtarma koduyla reset
+    PASSWORD_RESET_RES     = 236; // Broker → Master: reset sonucu
+    SESSION_RESTRICT_MODE  = 237; // Broker → Master: aynı hesapla başka giriş yapıldı, kısıtlı moda geç
+
+    // ── Uzaktan Veritabanı Değişikliği (Remote DB Mutations 240+) ──────────
+    DB_USER_ADD_REQ        = 240;
+    DB_USER_ADD_RES        = 241;
+    DB_USER_DEL_REQ        = 242;
+    DB_USER_DEL_RES        = 243;
+    DB_USER_PW_RESET_REQ   = 244;
+    DB_USER_PW_RESET_RES   = 245;
+    
+    DB_CLASS_ADD_REQ       = 246;
+    DB_CLASS_ADD_RES       = 247;
+    DB_CLASS_DEL_REQ       = 248;
+    DB_CLASS_DEL_RES       = 249;
+    DB_CLASS_RENAME_REQ    = 250;
+    DB_CLASS_RENAME_RES    = 251;
+    
+    DB_AGENT_ASSIGN_REQ    = 252;
+    DB_AGENT_ASSIGN_RES    = 253;
+    
+    DB_USER_GRANT_REQ      = 254;
+    DB_USER_GRANT_RES      = 255;
+    DB_USER_REVOKE_REQ     = 256;
+    DB_USER_REVOKE_RES     = 257;
+    AUDIT_LOG_RECORD       = 258;
+    AUDIT_LOG_QUERY_REQ    = 259;
+    AUDIT_LOG_QUERY_RES    = 260;
+    CHAT_HISTORY_REQ       = 261;
+    CHAT_HISTORY_RES       = 262;
+    CLIENT_UNREVOKE        = 263;  // Master → Broker: kara listeden çıkar
+    CLIENT_UNINSTALL       = 264;  // Broker → Agent: Kendini tamamen sil (apt purge)
+    CLIENT_REVOKED_BROADCAST = 265; // Broker → Master: Bir ajan sistemden kalıcı silindi
+
+    // ── OTA (Over-The-Air) Güncelleme ─────────────────────────
+    OTA_UPDATE_PUSH        = 270;  // Broker → Agent: Güncelleme var, al
+    OTA_UPDATE_BEGIN       = 271;  // Master → Broker / Broker → Agent: Transfer başlar
+    OTA_UPDATE_CHUNK       = 272;  // Transfer veri parçası
+    OTA_UPDATE_END         = 273;  // Transfer biter
+    OTA_UPDATE_INSTALL     = 274;  // Tray → Root Agent: Kurulumu başlat
+
+    // ── Broker Yapılandırma ───────────────────────────────────
+    BROKER_PORT_SET_REQ    = 280;  // Master → Broker: Portu değiştir
+    BROKER_PORT_SET_RES    = 281;  // Broker → Master: Port değişim sonucu
+
+    BROKER_UPDATES_LIST_REQ   = 282; // Master → Broker
+    BROKER_UPDATES_LIST_RES   = 283; // Broker → Master
+    BROKER_UPDATES_DELETE_REQ = 284; // Master → Broker
+    BROKER_UPDATES_DELETE_RES = 285; // Broker → Master
+
+    BROKER_OTA_UPDATE_BEGIN   = 287; // Master(YM) → Broker: Broker güncellemesi başlar
+    BROKER_OTA_UPDATE_CHUNK   = 288; // Master(YM) → Broker: Broker güncellemesi verisi
+    BROKER_OTA_UPDATE_END     = 289; // Master(YM) → Broker: Broker güncellemesi bitti
+    BROKER_OTA_UPDATE_INSTALL = 290; // Broker: Kurulum tetikle
+
+    MASTER_UPDATE_AVAILABLE    = 291; // Broker → Master: Yeni Master sürümü mevcut
+    MASTER_UPDATE_DOWNLOAD_REQ = 292; // Master → Broker: Master deb paketini indir
+
+    // ── Log Görüntüleyici (Tail / Query) ───────────────────────
+    LOG_TAIL_REQ               = 293; // Master → Broker / Agent
+    LOG_TAIL_RES               = 294; // Broker / Agent → Master
+
+    // ── Güvenlik / Windows İstemci Kaldırma Koruması ──────────
+    AGENT_UNINSTALL_PASS_SET   = 295; // Master(YM) → Broker / Broker → Agent (Windows): Kaldırma parolası SHA-256 hash'i
+    AGENT_UNINSTALL_PASS_RES   = 296; // Broker → Master: Kaldırma parolası güncelleme sonucu
+    AGENT_IPC_HANDSHAKE        = 297; // Tray → Agent Servisi (Local Socket): Kriptografik IPC Token Doğrulaması
+
+    // ── Akıllı Tahta (Tip 3) Kilit ve Öğretmen Anahtar Senkronizasyonu (300+) ─
+    TEACHER_KEY_SYNC_REQ       = 300; // Master → Broker / Broker → Agent: Şifreli öğretmen tohum listesi senkronizasyonu
+    TEACHER_KEY_SYNC_RES       = 301; // Agent/Broker → Master: Senkronizasyon sonucu
+    SMARTBOARD_LOCK_PIN_REPORT = 302; // Agent(Tip 3) → Broker → Master: Dev/Test aşaması aktif kilit PIN telemetrisi
+    SMARTBOARD_UNLOCK_NOTIFY   = 303; // Agent(Tip 3) → Broker → Master: Öğretmen oturumu açıldı bildirimi
+    DB_TEACHER_UPSERT_REQ      = 304; // Master → Broker: Öğretmen ekle / güncelle
+    DB_TEACHER_UPSERT_RES      = 305; // Broker → Master: Öğretmen kayıt sonucu
+    DB_TEACHER_DEL_REQ         = 306; // Master → Broker: Öğretmen sil
+    DB_TEACHER_DEL_RES         = 307; // Broker → Master: Öğretmen silme sonucu
+    DB_USER_UPDATE_REQ         = 308; // Master → Broker: Kullanıcı güncelle (Ad Soyad, Rol, Şifre, Replikasyon)
+    DB_USER_UPDATE_RES         = 309; // Broker → Master: Kullanıcı güncelleme sonucu
+    USER_ROLE_CHANGED_NOTIFY   = 310; // Broker → Master: Rolü yükseltilen/değişen aktif Master'a re-login bildirimi
+
+    // ── Tek Tıkla Geri Alma (Rollback / Downgrade) ─────────────
+    ROLLBACK_TO_STABLE_REQ     = 311; // Master(YM/OM) → Broker → Agent: Kararlı yerel sürüme dön
+    ROLLBACK_TO_STABLE_RES     = 312; // Agent → Broker → Master: Geri alma sonucu
+
+    // ── Broker İsim ve Port Yapılandırması ─────────────────────
+    BROKER_CONFIG_SET_REQ      = 313; // Master(YM) → Broker: Broker adı ve portunu güncelle
+    BROKER_CONFIG_SET_RES      = 314; // Broker → Master: Broker adı ve port güncelleme sonucu
+
+    // ── Akıllı Tahta Yerel Kullanıcı Tarama (EBA / Yerel Hesaplar) ─
+    QUERY_LOCAL_USERS_REQ      = 315; // Master → Broker → Agent: Akıllı tahtadaki yerel kullanıcıları sorgula
+    QUERY_LOCAL_USERS_RES      = 316; // Agent → Broker → Master: Akıllı tahtadaki yerel kullanıcı listesi
+
+    // ── Özel Ajan Profilleri (Custom Student Profiles) ─────────
+    CUSTOM_PROFILE_UPSERT_REQ  = 317; // Master(YM) → Broker: Özel profil ekle / güncelle
+    CUSTOM_PROFILE_UPSERT_RES  = 318; // Broker → Master: Profil ekleme / güncelleme cevabı
+    CUSTOM_PROFILE_DELETE_REQ  = 319; // Master(YM) → Broker: Özel profil sil
+    CUSTOM_PROFILE_DELETE_RES  = 320; // Broker → Master: Profil silme cevabı
+}
+
+
+// Tüm mesajları saran zarf
+message Envelope {
+    MessageType type           = 1;
+    uint64      sequence_id    = 2;   // agent→master: qHash(clientId) — geriye dönük uyumlu
+    bytes       payload        = 3;
+    string      target_id      = 4;   // master→agent: clientId (boş = broadcast)
+}
+
+// El sıkışma — KALDIRILDI (TLS/mTLS bağlantı güvenliğini karşılıyor)
+// HandshakeChallenge ve HandshakeResponse proto'dan çıkarıldı (2026-04).
+
+// İstemci bilgisi
+message ClientInfo {
+    string hostname      = 1;
+    string username      = 2;
+    string os_version    = 3;
+    string ip_address    = 4;
+    string mac_wired     = 5;
+    string mac_wifi      = 6;
+    string machine_id    = 7;
+    uint32 screen_width  = 8;
+    uint32 screen_height = 9;
+    string room_id       = 10;
+    uint32 agent_type    = 11; // 0=Standard, 1=Tip 1, 2=Tip 2, 3=Tip 3
+    string agent_version = 12;
+    string os_tag        = 13;
+    string os_arch       = 14;
+    string screens       = 15;
+    string alias         = 16;
+    string display_name  = 17; // Aktif kullanıcının görünen adı (Ad Soyad / GECOS / FullName)
+    bool   rtc_battery_low = 18; // Donanım saati (RTC) / BIOS pili arıza uyarısı
+}
+
+// Ekran
+message ScreenFrame {
+    uint32 width        = 1;
+    uint32 height       = 2;
+    bytes  jpeg_data    = 3;
+    bool   is_full_frame= 4;
+    int32  cursor_x     = 5; // Fare imleci X konumu
+    int32  cursor_y     = 6; // Fare imleci Y konumu
+    bool   has_cursor   = 7; // Fare imleci aktif mi
+}
+
+message ScreenConfig {
+    uint32 interval_ms = 1;
+    uint32 jpeg_quality = 2;
+    uint32 max_width = 3;
+}
+
+message ScreenTileUpdate {
+    repeated Tile tiles = 1;
+    uint32 screen_width  = 2; // Aktif ekranın genişliği (piksel)
+    uint32 screen_height = 3; // Aktif ekranın yüksekliği (piksel)
+
+    message Tile {
+        uint32 x         = 1;
+        uint32 y         = 2;
+        uint32 width     = 3;
+        uint32 height    = 4;
+        bytes  jpeg_data = 5;
+    }
+}
+
+// Güç yönetimi
+message PowerCommand {
+    string reason  = 1;
+    uint32 delay_s = 2;
+}
+
+// Dosya transferi
+message FileTransferBegin {
+    string filename    = 1;
+    uint64 file_size   = 2;
+    string mime_type   = 3;
+    bool   read_only   = 4;
+    string destination = 5;  // "" = masaüstü (varsayılan), "tmp" = /tmp
+}
+
+message FileTransferChunk {
+    uint32 chunk_index = 1;
+    bytes  data        = 2;
+    bool   is_last     = 3;
+}
+
+message RemoteControlRequest {
+    bool is_control = 1;      // true ise kontrol, false ise sadece izleme
+}
+
+// Agent → Master
+message RemoteControlResponse {
+    bool accepted = 1;        // Kullanıcı onayladı mı?
+    string reason = 2;        // Reddedildiyse açıklama
+}
+
+// ===========================================================================
+// OTA Güncelleme Mesajları
+// ===========================================================================
+
+message OtaUpdateBegin {
+    string filename    = 1;
+    uint64 file_size   = 2;
+    string os_tag      = 3;   // "ubuntu24", "debian12" vb.
+    string version     = 4;   // "0.1.0"
+    bytes  signature   = 5;
+    bytes  file_hash   = 6;
+    bytes  master_cert = 7;
+}
+
+message OtaUpdateChunk {
+    uint32 chunk_index = 1;
+    bytes  data        = 2;
+    bool   is_last     = 3;
+}
+
+message OtaUpdatePush {
+    string os_tag      = 1;
+    string version     = 2;
+    uint64 file_size   = 3;
+    bytes  signature   = 4;
+    bytes  file_hash   = 5;
+    bytes  master_cert = 6;
+}
+
+message OtaBrokerReport {
+    string message = 1;
+    bool   success = 2;
+}
+
+message MasterUpdateAvailable {
+    string version     = 1;
+    string filename    = 2;
+    uint64 file_size   = 3;
+    string os_tag      = 4;
+    string os_arch     = 5;
+    bytes  signature   = 6;
+    bytes  file_hash   = 7;
+    bytes  master_cert = 8;
+}
+
+message MasterUpdateDownloadRequest {
+    string version = 1;
+    string os_tag  = 2;
+    string os_arch = 3;
+}
+
+
+// ===========================================================================
+// File Transfer Mesajları
+// ===========================================================================
+
+// Ses yayını
+message AudioBroadcast {
+    enum Type {
+        LIVE = 0;
+        FILE = 1;
+    }
+    Type   type      = 1;
+    bytes  audio_data= 2;
+    string format    = 3;
+}
+
+// Sohbet
+// Gönderen rolü (sohbet baloncuk rengi için)
+enum SenderRole {
+    ROLE_UNKNOWN = 0;
+    ROLE_ADMIN   = 1;   // Yönetici (Master)
+    ROLE_TEACHER = 2;   // Öğretmen (Slave)
+    ROLE_CLIENT  = 3;   // İstemci (Agent)
+}
+
+enum ChatMessageType {
+    CHAT_MSG_TEXT        = 0;
+    CHAT_MSG_SYSTEM      = 1;
+    CHAT_MSG_IMAGE       = 2;
+    CHAT_MSG_FILE        = 3;
+    CHAT_MSG_WHITEBOARD  = 4;
+    CHAT_MSG_VIDEO_SIGNAL= 5;
+}
+
+message ChatMessage {
+    string          from        = 1;
+    string          to          = 2;
+    string          room_id     = 3;
+    string          content     = 4;
+    uint64          timestamp   = 5;
+    ChatMessageType msg_type    = 6;
+    SenderRole      sender_role = 7;   // Baloncuk rengi için
+    string          metadata    = 8;   // JSON payload for rich data
+}
+
+// Sınav
+message ExamCommand {
+    string exam_id    = 1;
+    string title      = 2;
+    uint32 duration_s = 3;
+}
+
+// Heartbeat
+message Heartbeat {
+    uint64 timestamp  = 1;
+    float  cpu_usage  = 2;
+    float  mem_usage  = 3;
+}
+
+// Raporlama
+message ReportEvent {
+    enum EventType {
+        CLIENT_CONNECTED    = 0;
+        CLIENT_DISCONNECTED = 1;
+        COMMAND_APPLIED     = 2;
+        APP_BLOCKED         = 3;
+    }
+    EventType type      = 1;
+    string    client_id = 2;
+    string    detail    = 3;
+    uint64    timestamp = 4;
+}
+
+// Ekran kilitleme komutu
+message ScreenLockCommand {
+    string message = 1;   // Öğrenciye gösterilecek mesaj (opsiyonel)
+    uint32 lock_policy = 2; // 0 = Varsayılan, 1 = Normal Perde Kilidi, 2 = Dinamik QR & PIN Kilidi, 3 = Oturumu Kapat (Teneffüs Logout)
+    uint32 grace_period_sec = 3; // 0 = Anında kilitle, >0 = Teneffüs nezaket penceresi (sn)
+}
+
+// Ekran görüntüsü sonucu
+message ScreenCaptureResult {
+    bytes  png_data   = 1;
+    uint64 timestamp  = 2;
+    uint32 width      = 3;
+    uint32 height     = 4;
+}
+
+// Fare olayı (uzak kontrol)
+message MouseEvent {
+    int32 x        = 1;
+    int32 y        = 2;
+    int32 button   = 3;   // 1=sol, 2=orta, 3=sağ
+    bool  pressed  = 4;
+    bool  is_move  = 5;   // true → move, false → button event
+    bool  is_scroll= 6;
+    int32 delta    = 7;   // scroll delta
+}
+
+// Klavye olayı (uzak kontrol)
+message KeyEvent {
+    uint32 keysym  = 1;   // X11 KeySym değeri
+    bool   pressed = 2;
+}
+
+// Uygulama komutu
+message AppCommand {
+    string          name      = 1;  // Uygulama adı veya yolu
+    string          hash      = 2;  // SHA256 hash (BLOCK_BYHASH için)
+    repeated string whitelist = 3;  // Beyaz liste (WHITELIST_SET için)
+    repeated string blacklist = 4;  // Kara liste (APP_BLOCK_LIST için)
+}
+
+// Ses seviyesi komutu
+message AudioVolumeCommand {
+    uint32 volume = 1;   // 0-100
+}
+
+// Agent'ta yerel dosyaları playlist olarak çal
+message AudioPlayLocalCommand {
+    string anons_path   = 1;  // /tmp/okidia_anons_xxx.wav
+    int32  repeat_count = 2;  // anons tekrar sayısı (varsayılan 1)
+    bool   is_bell      = 3;  // true ise Zil (Popup ve DingDong atlanır), false ise Yönetici Anonsu
+}
+
+// El kaldırma olayı (agent → master)
+message HandRaiseEvent {
+    string client_id = 1;
+    string message   = 2;   // Opsiyonel: "Sorum var" gibi
+    uint64 timestamp = 3;
+}
+
+// Ekran yayını başlatma (master → broker → hedeflenen agent'lar)
+message BroadcastBegin {
+    repeated string target_ids = 1; // Boş ise kurallara göre (YM: hepsi, OM: kendi sınıfı+sahipsizler)
+    string   sender_user       = 2;
+    string   sender_display    = 3;
+}
+
+// Ekran yayını karesi (master → hedeflenen agent'lar)
+message BroadcastFrame {
+    uint32 width        = 1;
+    uint32 height       = 2;
+    bytes  jpeg_data    = 3;
+    uint64 timestamp    = 4;
+}
+
+// Tek monitör bilgisi
+message MonitorInfo {
+    uint32 index        = 1;   // 0 = birincil
+    string name         = 2;   // "HDMI-1", "eDP-1" vb.
+    int32  x            = 3;   // Sanal ekranda konum
+    int32  y            = 4;
+    uint32 width        = 5;
+    uint32 height       = 6;
+    bool   is_primary   = 7;
+}
+
+// Agent → Master: monitör + pencere listesi
+message AppInfo {
+    string name    = 1;   // Pencere başlığı
+    uint64 wid     = 2;   // Window ID (X11)
+    string pid     = 3;   // Process ID
+    string exe     = 4;   // Uygulama adı (basename)
+}
+
+message AppListResponse {
+    repeated AppInfo apps = 1;
+}
+
+message ScreenInfoResponse {
+    repeated MonitorInfo monitors = 1;
+    // Aktif pencereler (başlık + WID)
+    repeated ActiveWindow windows = 2;
+
+    message ActiveWindow {
+        string  title   = 1;
+        uint64  wid     = 2;   // X11 Window ID
+        uint32  x       = 3;
+        uint32  y       = 4;
+        uint32  width   = 5;
+        uint32  height  = 6;
+    }
+}
+
+// Master → Agent: hangi kaynaktan yakala
+message ScreenSelectCommand {
+    enum SourceType {
+        MONITOR = 0;   // Belirli monitör
+        WINDOW  = 1;   // Belirli pencere
+        ALL     = 2;   // Tüm monitörler birleşik
+    }
+    SourceType source       = 1;
+    uint32     monitor_index= 2;   // MONITOR modunda hangi monitör
+    uint64     window_id    = 3;   // WINDOW modunda hangi pencere (X11 WID)
+}
+
+// Web filtreleme komutu
+message WebFilterCommand {
+    reserved 1;
+    string          reason       = 2;  // Engelleme sebebi (opsiyonel, öğrenciye gösterilir)
+    repeated string domains      = 3;  // Engellenecek alan adları (WEB_BLOCK_DOMAINS için)
+}
+
+// Zamanlı komut — herhangi bir Envelope'u belirli bir zaman sonra çalıştırır
+message ScheduleCommand {
+    uint64 run_at_epoch = 1;   // Unix timestamp (saniye) — 0 ise delay_s kullan
+    uint32 delay_s      = 2;   // Şu andan kaç saniye sonra
+    bytes  payload      = 3;   // Çalıştırılacak Envelope (serileştirilmiş)
+    string label        = 4;   // Açıklama (UI'de gösterilir)
+}
+
+// Ses yayını komutu
+message AudioBroadcastCommand {
+    enum SourceType {
+        MICROPHONE = 0;
+        FILE       = 1;
+        LIVE       = 2;   // Canlı PCM stream
+    }
+    SourceType source      = 1;
+    bytes      audio_data  = 2;   // FILE/LIVE modunda ses verisi
+    string     format      = 3;   // "mp3", "wav", "ogg" vb. (FILE modu)
+    uint32     volume      = 4;   // 0-100, 0 = değiştirme
+    uint32     sample_rate = 5;   // LIVE modu: örnekleme hızı (Hz)
+    uint32     channels    = 6;   // LIVE modu: kanal sayısı (1=mono)
+}
+// ── Zaman Senkronizasyonu & Donanım Sağlığı ───────────────────
+message TimeSyncRequest {
+    string sender_id           = 1; // machine_id veya username
+    int64  client_local_time   = 2; // istemcinin o anki yerel UTC saniye damgası
+    bool   rtc_fault_suspected = 3; // Agent yerel saatinin sertifikasından geride olduğunu fark etti mi?
+    bool   is_first_enrollment = 4; // Henüz sertifikası olmayan (ilk kez katılan) istemci mi?
+}
+
+message TimeSyncResponse {
+    int64  server_utc_time   = 1; // Broker geçerli UTC saniye damgası
+    bool   broker_time_valid = 2; // Broker saati kendi Kök CA'sından büyük mü?
+    string broker_version    = 3;
+}
+
+message BrokerTimeWarning {
+    bool   is_desync        = 1; // Broker saati sertifikasından geride mi?
+    int32  remaining_logins = 2; // Kalan yönetici giriş toleransı (3..0)
+    string warning_message  = 3;
+    bool   is_locked        = 4; // Tolerans bitti, sistem kilitlendi mi?
+}
+
+message ClientHardwareAlert {
+    string machine_id       = 1;
+    string hostname         = 2;
+    string alert_type       = 3; // "BIOS_BATTERY_DEAD"
+    int32  occurrence_count = 4; // Kaç kez tolerans dışı geride açıldı (örn: 3)
+    string details          = 5;
+}
+
+// Sertifika keşif isteği (DISCOVERY_REQUEST)
+message DiscoveryRequest {
+    string hostname       = 1;
+    string username       = 2;
+    string machine_id     = 3;
+    string mac_address    = 4;
+    string ip_address     = 5;
+    string agent_version  = 6;
+    string os_info        = 7;
+    bytes  csr_pem        = 8;   // openssl CSR (PEM formatında)
+    string os_arch        = 9;
+}
+
+// Sertifika dağıtımı (CERT_PROVISION)
+message CertProvision {
+    bytes  cert_pem   = 1;   // İmzalı agent.crt (PEM)
+    bytes  ca_pem     = 2;   // ca.crt (PEM) — güncel versiyonu
+}
+
+// İstemci iptal komutu (CLIENT_REVOKE)
+// Master → Broker: machine_id'li istemciyi kopar + kara listeye al
+// Broker → Agent: sertifikalarını sil, yeniden kayıt isteği gönder
+message ClientRevokeCommand {
+    string machine_id = 1;   // iptal edilecek machine-id; boş → tüm istemciler
+    bool   all        = 2;   // true → tüm istemcileri iptal
+    bool   uninstall  = 3;   // true → ajana kendini silmesi (apt purge) emredilir
+}
+
+// İstemci yasağını kaldırma (CLIENT_UNREVOKE)
+// Master → Broker: machine_id'li istemcinin yasağını (blacklist) kaldır
+message ClientUnrevokeCommand {
+    string machine_id = 1;
+}
+
+// Bir ajanın kalıcı olarak sistemden silindiğinin yayını
+// Broker → Master: bu ajanı tüm arayüzlerden, ağaçtan, chat'ten vb. sil
+message ClientRevokedBroadcast {
+    string machine_id = 1;
+}
+
+// Discovery reddet (DISCOVERY_REJECT)
+// Master → Broker: bu bağlantı isteğini reddet, kara listeye alma
+message DiscoveryReject {
+    string peer_ip = 1;  // Reddedilecek IP
+}
+
+// Discovery tamamlandı bildirimi (DISCOVERY_RESOLVED_BROADCAST)
+// Broker → Master: Bir master istemciyi onayladı, reddetti veya yoksaydı.
+// Diğer tüm master'ların onay listelerinden bu istemci düşürülür.
+message DiscoveryResolvedBroadcast {
+    string target_id   = 1; // Onaylanan/reddedilen istemci (machine_id veya IP)
+    string resolved_by = 2; // İşlemi yapan Master kullanıcı adı / ID
+    string action      = 3; // "approve", "reject", "ignore"
+    uint32 agent_type  = 4; // 1=Öğrenci, 2=İdari, 3=Akıllı Tahta
+    string hostname    = 5; // İstemci bilgisayar adı
+}
+
+// Client listesi (CHAT_LIST_RESPONSE)
+message ChatClientList {
+    string requester_client_id = 1;
+
+    message Entry {
+        string client_id = 1;
+        string hostname  = 2;
+        string username  = 3;
+    }
+    repeated Entry clients = 2;
+}
+
+// Sohbet daveti (CHAT_INVITE)
+message ChatInvite {
+    string from_client_id = 1;
+    string to_client_id   = 2;
+    string from_hostname  = 3;
+    string from_username  = 4;
+    string room_id        = 5;   // boş → yeni oda; dolu → mevcut odaya davet
+    string message        = 6;
+}
+
+// Oda oluşturuldu (CHAT_ROOM_CREATED)
+message ChatRoomCreated {
+    string room_id        = 1;
+    string room_name      = 2;
+    string parent_room_id = 4;
+
+    message Member {
+        string client_id   = 1;
+        string hostname    = 2;
+        string username    = 3;
+        bool   online      = 4;
+        bool   window_open = 5;
+    }
+    repeated Member members = 3;
+}
+
+// Odaya üye ekle (CHAT_ADD_MEMBER)
+message ChatAddMember {
+    string room_id   = 1;
+    string client_id = 2;
+}
+
+// Odadan ayrıl (CHAT_LEAVE)
+message ChatLeave {
+    string room_id   = 1;
+    string client_id = 2;
+}
+
+// Üye olayı (CHAT_MEMBER_JOINED / CHAT_MEMBER_LEFT)
+message ChatMemberEvent {
+    string room_id   = 1;
+    string client_id = 2;
+    string hostname  = 3;
+    string username  = 4;
+}
+
+// İlk kurulum sertifika isteği (SETUP_REQUEST)
+// Master → Broker: kurulum kodu + CSR
+message SetupRequest {
+    string setup_code   = 1;  // Broker'ın ürettiği tek kullanımlık kod
+    string csr_pem      = 2;  // master.key için CSR
+    string hostname     = 3;
+    string username     = 4;  // İlk YM kullanıcı adı (boşsa mevcut kurulum)
+    string password_hash = 5; // Argon2id hash (boşsa mevcut kurulum)
+    string display_name = 6;
+    string recovery_key_hash = 7;
+    string school_name  = 8;  // Kurum / Okul / Ağ Adı (Zorunlu)
+}
+
+// Kurulum yanıtı (SETUP_RESPONSE)
+// Broker → Master: başarı veya hata
+message SetupResponse {
+    bool   success      = 1;
+    string error_msg    = 2;  // Başarısızsa açıklama
+    string master_cert  = 3;  // İmzalı master.crt (PEM)
+    string ca_cert      = 4;  // CA sertifikası (PEM)
+    string master_id    = 5;  // DB'deki user id
+    string school_name  = 6;  // Onaylanan kurum / okul adı
+}
+
+message JoinRequest {
+    string join_code = 1;
+    string csr_pem = 2;
+    string hostname = 3;
+    string password_hash = 4;  // OM'un kendi belirlediği şifrenin SHA-256 hash'i
+}
+
+message JoinResponse {
+    bool success = 1;
+    string error_msg = 2;
+    string master_cert = 3;
+    string ca_cert = 4;
+    string username = 5;       // Giriş için kullanıcı adı
+    bool must_change_pw = 6;   // İlk girişte şifre değiştirme zorunluluğu
+    string school_name = 7;    // Broker'dan gelen kurum / okul adı
+}
+
+message JoinCodeRequest {
+    string user_id = 1;
+}
+
+message JoinCodeResponse {
+    bool success = 1;
+    string code = 2;
+    string error_msg = 3;
+}
+
+// Discovery onay komutu (DISCOVERY_APPROVE)
+// Master → Broker: bu isteği onayla, broker CSR'ı imzalar ve agent'a gönderir
+message DiscoveryApprove {
+    string target_id = 1;  // peerIp — hangi pending isteği onayla
+    uint32 agent_type = 2; // 0=Standard, 1, 2, 3
+}
+
+// Agent tipi değişikliği sonucu
+message AgentTypeSetResult {
+    uint32 requested_type = 1;
+    bool approved = 2;
+    string reason = 3;
+}
+
+// İstemci Takma Ad / Sınıf Adı Ata (AGENT_ALIAS_SET)
+message AgentAliasSet {
+    string machine_id = 1;
+    string alias      = 2;
+}
+
+// İstemci Sistem Politikaları (AGENT_POLICY_SET)
+message AgentPolicySet {
+    bool   disable_switch_user    = 1;
+    bool   usb_protection_enabled = 2; // USB Flaş bellek güvenli senkronizasyon ve otomatik dosya sistemi onarımı
+    string school_schedule_json   = 3; // Otonom okul ders/zil çizelgesi JSON önbelleği
+    uint32 smartboard_lock_policy = 4; // 1 = Klasik Perde, 2 = Dinamik QR & PIN
+    string school_timezone        = 5; // Okul saat dilimi
+    bool   bell_smartboard_enabled= 6; // Akıllı tahtalarda zil çalsın mı
+    bool   bell_student_pc_enabled= 7; // Öğrenci bilgisayarlarında zil çalsın mı
+    bool   bell_auto_lock_recess  = 8; // Teneffüste otomatik kilitleme
+    int32  last_bell_lock_behavior= 9; // Son ders çıkış zili davranışı (0: Hibrit, 1: Asla kilitleme, 2: Her zaman kilitle)
+}
+
+// Broker durum mesajı (BROKER_STATUS)
+// Broker servis → Broker tray: anlık durum
+message BrokerStatus {
+    bool   ready         = 1;
+    bool   master_conn   = 2;
+    int32  client_count  = 3;
+    string setup_code    = 4;  // boşsa kullanıldı
+    string error_msg     = 5;
+    repeated string pending_ips = 6;  // onay bekleyen discovery machineId'leri (UUID)
+    repeated string master_names = 7; // sisteme bağlı master kullanıcılarının Ad soyad bilgisi
+    string broker_name   = 8;  // Sunucu adı (Örn: OKIDIA-Broker, Lab-1-Broker)
+    uint32 broker_port   = 9;  // Sunucu portu (Örn: 11200)
+}
+
+// Broker tray komutu (BROKER_CMD)
+message BrokerCommand {
+    enum Type {
+        STOP       = 0;
+        STATUS     = 1;
+        SET_CONFIG = 2;
+    }
+    Type   type        = 1;
+    string broker_name = 2;
+    uint32 broker_port = 3;
+}
+
+// Özel sohbet mesajları
+message PrivateChatRequest {
+    string request_id   = 1;
+    string from_host    = 2;
+    string from_display = 3;
+    string from_user    = 4;
+    string ecdh_public_key = 5;
+}
+
+message PrivateChatAccept {
+    string request_id = 1;
+    string session_id = 2;
+    string ecdh_public_key = 3;
+}
+
+message PrivateChatReject {
+    string request_id       = 1;
+    uint32 cooldown_seconds = 2;
+}
+
+message PrivateChatOpen {
+    string session_id   = 1;
+    string from_host    = 2;
+    string from_display = 3;
+}
+
+message PrivateChatMessage {
+    string session_id = 1;
+    string content    = 2;
+    uint64 timestamp  = 3;
+}
+
+message PrivateChatClose {
+    string session_id = 1;
+}
+
+// Agent sohbet penceresi açık/kapalı bildirimi
+message ChatWindowState {
+    bool open = 1;
+}
+
+
+// Sınıf/grup sohbet kilit durumu
+message ChatLockState {
+    string class_id      = 1;  // sınıf/grup UUID
+    bool   chat_locked   = 2;  // true → sohbet odası kilitli
+    bool   private_locked= 3;  // true → özel sohbet kilitli
+}
+
+// Sınıf sohbetine misafir katılım izni isteği
+message RoomJoinRequest {
+    string request_id      = 1;
+    string room_id         = 2;
+    string room_name       = 3;
+    string from_username   = 4;
+    string from_display    = 5;
+    string target_username = 6;
+}
+
+// Sınıf sohbetine misafir katılım izni yanıtı
+message RoomJoinResponse {
+    string request_id      = 1;
+    string room_id         = 2;
+    string from_username   = 3;
+    string target_username = 4;
+    bool   accepted        = 5;
+    string reason          = 6;
+}
+
+// ── SSH Kimlik Yönetimi (SSH_CRED_*) ─────────────────────────────────────
+message SshCredential {
+    string id          = 1;
+    string name        = 2;
+    string username    = 3;
+    bytes  secret      = 4;   // Şifrelenmiş parola veya private key
+    bool   is_key      = 5;
+    string owner_id    = 6;   // Boş ise ortak kimlik
+    uint64 created_at  = 7;
+    string target_id   = 8;   // Agent machine_id veya Class UUID
+    string target_type = 9;   // "agent" veya "class"
+    string machine_id  = 10;
+}
+
+message SshCredListRequest {
+    string requester_user_id = 1; // Boşsa sadece ortakları döndürür
+}
+
+message SshCredListResponse {
+    repeated SshCredential credentials = 1;
+}
+
+message SshCredAddRequest {
+    SshCredential credential = 1;
+}
+
+message SshCredDelRequest {
+    string id = 1;
+    string requester_user_id = 2; // Yetki kontrolü için
+}
+// Agent servis durumu (Tray'e bildirmek için)
+message AgentStatus {
+    bool broker_connected = 1;
+}
+
+// Agent → Master: fare imleci değişimi
+message CursorShapeChange {
+    uint32 cursor_id = 1;   // Qt::CursorShape değerleri ile uyumlu veya özel mapping
+    uint32 x = 2;
+    uint32 y = 3;
+}
+
+// ── Broker Ayarları ve Yedekleme (210+) ──────────────────────────────────
+message BrokerSettingsUpdate {
+    uint32 audit_retention_days = 1;
+    uint32 auto_backup_retention_count = 2;
+    bool   auto_backup_include_chat = 3;
+    string backup_password = 4;
+    bool   has_backup_password = 5;
+    string school_schedule_json = 6;
+    string school_timezone = 7;
+    uint32 smartboard_lock_policy = 8;
+}
+
+message BrokerStorageWarning {
+    uint64 available_bytes = 1;
+    uint64 required_bytes  = 2;
+    string warning_message = 3;
+}
+
+message DbBackupRequest {
+    string requester_user_id = 1;
+    bool   include_audit = 2; // okidia_audit.db dahil edilsin mi?
+    bool   include_chat  = 3; // okidia_chat.db dahil edilsin mi?
+}
+
+message IdentityFile {
+    string name    = 1;
+    bytes  content = 2;
+}
+
+message DbBackupResponse {
+    bool   success      = 1;
+    string error_msg    = 2;
+    bytes  encrypted_db = 3;  // okidia.db (Broker anahtarıyla şifreli)
+    bytes  broker_key   = 4;  // Geriye dönük uyumluluk için
+    repeated IdentityFile identity_bundle = 5; // Tüm sertifika ve anahtarlar
+    bytes  encrypted_audit_db = 6; // okidia_audit.db (Broker anahtarıyla şifreli)
+    bytes  encrypted_chat_db  = 7; // okidia_chat.db (Broker anahtarıyla şifreli)
+    bool   has_audit    = 8;
+    bool   has_chat     = 9;
+}
+
+message DbRestoreRequest {
+    bytes  encrypted_db = 1; // okidia.db
+    bytes  broker_key   = 2;  
+    repeated IdentityFile identity_bundle = 3; // Tüm sertifika ve anahtarlar
+    string setup_code   = 4;
+    bytes  encrypted_audit_db = 5; // okidia_audit.db
+    bytes  encrypted_chat_db  = 6; // okidia_chat.db
+    bool   restore_audit = 7;
+    bool   restore_chat  = 8;
+}
+
+message DbRestoreResponse {
+    bool   success   = 1;
+    string error_msg = 2;
+}
+
+message BackupReplicaCheck {
+    string filename   = 1; // Dosya adı (örn: okidia_20261001_130110.okbak)
+    uint64 total_size = 2; // Toplam dosya boyutu (byte)
+    string file_hash  = 3; // SHA256 dosya hash'i (opsiyonel)
+}
+
+message BackupReplicaPull {
+    string filename   = 1; // İstenen dosya adı
+    uint64 offset     = 2; // Başlangıç ofseti (resume desteği)
+}
+
+message BackupReplicaPush {
+    bytes  package_data  = 1; // Şifreli .okbak paketi veya chunk parçası
+    string filename      = 2; // Dosya adı (örn: okidia_20260908_030000.okbak)
+    uint64 total_size    = 3; // Toplam dosya boyutu (byte)
+    uint64 offset        = 4; // Bu parçanın başlangıç ofseti
+    bool   is_last_chunk = 5; // Son parça mı?
+}
+
+// ── Ağ Login ve Otomatik Sertifika ───────────────────────────────────────
+message LoginRequest {
+    string username      = 1;
+    string password_hash = 2; // Argon2id hash (Master'da hesaplanır)
+    string app_version   = 3; // Master uygulama sürümü (Örn: "0.1.468")
+    string os_tag        = 4; // "ubuntu24", "debian12" vb.
+    string os_arch       = 5; // "amd64", "arm64" vb.
+    string os_pretty_name = 6; // "Linux Mint 22.1", "Ubuntu 24.04 LTS" vb.
+    string hostname      = 7; // Master makine adı (Örn: "yonetici-pc")
+    string machine_id    = 8; // Master fiziksel cihaz kimliği
+}
+
+message LoginResponse {
+    bool   success        = 1;
+    string error_msg      = 2;
+    string user_id        = 3;
+    string role           = 4; // "YM" veya "OM"
+    string display_name   = 5;
+    bool   must_change_pw = 6;
+    string broker_version = 7; // Broker sunucu sürümü (Örn: "0.1.468")
+    string broker_os      = 8; // Broker işletim sistemi görünen adı (Örn: "Linux Mint 22.1", "Ubuntu 24.04 LTS")
+    string broker_arch    = 9; // Broker mimarisi (Örn: "amd64", "arm64")
+    repeated string broker_ips = 10; // Broker sunucusunun tüm aktif IPv4 adresleri
+    string broker_os_tag  = 11; // Broker paketleme etiketi (Örn: "ubuntu24", "debian12")
+    string school_name    = 12; // Bağlanılan Broker sunucusunun okul / kurum adı
+}
+
+message EnrollRequest {
+    string csr_pem  = 1;
+    string hostname = 2;
+}
+
+message EnrollResponse {
+    bool   success     = 1;
+    string error_msg   = 2;
+    string master_cert = 3;
+    string ca_cert     = 4;
+}
+
+message SetRecoveryKeyRequest {
+    string key_hash = 1;
+}
+
+message PasswordResetRequest {
+    string recovery_key      = 1;
+    string new_password_hash = 2;
+}
+
+message PasswordResetResponse {
+    bool   success   = 1;
+    string error_msg = 2;
+}
+
+// ── Uzaktan Veritabanı Değişikliği Paylaşım Yapıları ─────────────────────
+
+message DbUserAddRequest {
+    string username          = 1;
+    string display_name      = 2;
+    string password_hash     = 3;
+    string role              = 4;
+    bool   is_backup_replica = 5;
+    string user_id           = 6;  // İstemcinin yerel ürettiği UUID (opsiyonel)
+    string replica_machine_id = 7; // Yedek replikasyon cihaz kimliği (opsiyonel)
+    string replica_hostname   = 8; // Yedek replikasyon cihaz adı (opsiyonel)
+}
+
+message DbUserAddResponse {
+    bool   success   = 1;
+    string error_msg = 2;
+}
+
+message DbUserSetReplicaRequest {
+    string user_id           = 1;
+    bool   is_backup_replica = 2;
+    string replica_machine_id = 3; // Yedek replikasyon cihaz kimliği (opsiyonel)
+    string replica_hostname   = 4; // Yedek replikasyon cihaz adı (opsiyonel)
+}
+
+message DbUserSetReplicaResponse {
+    bool   success   = 1;
+    string error_msg = 2;
+}
+
+message DbUserDelRequest {
+    string user_id = 1;
+}
+
+message DbUserDelResponse {
+    bool   success   = 1;
+    string error_msg = 2;
+}
+
+message DbUserPwResetRequest {
+    string user_id        = 1;
+    string password_hash  = 2;
+    bool   is_admin_reset = 3;
+}
+
+message DbUserPwResetResponse {
+    bool   success   = 1;
+    string error_msg = 2;
+}
+
+message DbClassAddRequest {
+    string name      = 1;
+    string icon      = 2;
+    string parent_id = 3;
+    string type      = 4; // "class" veya "group"
+    string id        = 5; // Opsiyonel: istemci tarafından belirlenen UUID
+}
+
+message DbClassAddResponse {
+    bool   success   = 1;
+    string error_msg = 2;
+}
+
+message DbClassDelRequest {
+    string class_id = 1;
+}
+
+message DbClassDelResponse {
+    bool   success   = 1;
+    string error_msg = 2;
+}
+
+message DbClassRenameRequest {
+    string class_id = 1;
+    string new_name = 2;
+}
+
+message DbClassRenameResponse {
+    bool   success   = 1;
+    string error_msg = 2;
+}
+
+message DbAgentAssignRequest {
+    string agent_id = 1;
+    string group_id = 2;
+}
+
+message DbAgentAssignResponse {
+    bool   success   = 1;
+    string error_msg = 2;
+}
+
+message DbUserGrantRequest {
+    string user_id  = 1;
+    string class_id = 2;
+    string level    = 3;
+}
+
+message DbUserGrantResponse {
+    bool   success   = 1;
+    string error_msg = 2;
+}
+
+message DbUserRevokeRequest {
+    string user_id  = 1;
+    string class_id = 2;
+}
+
+message DbUserRevokeResponse {
+    bool   success   = 1;
+    string error_msg = 2;
+}
+
+message AuditLogRecord {
+    string actor = 1;
+    string target = 2;
+    string detail = 3;
+    string category = 4;
+    string user_id = 5;
+    string master_id = 6;
+    uint64 timestamp = 7;
+}
+
+message AuditLogQueryRequest {
+    uint64 from_timestamp = 1;
+    uint64 to_timestamp = 2;
+    string category = 3;
+    int32 limit = 4;
+    int32 offset = 5;
+    string search_query = 6;
+    string actor = 7;
+    string target = 8;
+}
+
+message AuditLogQueryResponse {
+    repeated AuditLogRecord records = 1;
+    int32 total_count = 2;
+}
+
+message ChatHistoryRequest {
+    string room_id = 1;
+    int32 limit = 2;
+    uint64 before_timestamp = 3;
+}
+
+message ChatHistoryRecord {
+    string id = 1;
+    string room_id = 2;
+    string from_host = 3;
+    int32 sender_role = 4;
+    string content = 5;
+    uint64 timestamp = 6;
+    bool is_system = 7;
+}
+
+message ChatHistoryResponse {
+    string room_id = 1;
+    repeated ChatHistoryRecord records = 2;
+}
+
+message AgentLockInfo {
+    string client_id = 1;
+    string master_user_id = 2;
+    string master_display_name = 3;
+    string lock_type = 4;
+    uint64 locked_at = 5;
+}
+
+message AgentLockStatusBroadcast {
+    repeated AgentLockInfo locks = 1;
+}
+
+// ── Setup Code Verification ────────────────────────────────────────────────
+message VerifySetupCodeRequest {
+    string setup_code = 1;
+}
+
+message VerifySetupCodeResponse {
+    bool success = 1;
+    string error_msg = 2;
+}
+
+
+message SystemMetrics {
+    string client_id = 1;
+    uint32 cpu_usage = 2; // %
+    uint32 ram_usage = 3; // %
+    uint64 disk_total = 4; // bytes
+    uint64 disk_used = 5; // bytes
+    uint32 disk_usage = 6; // %
+}
+
+// ── Broker Port Configuration ──────────────────────────────────────────────
+message BrokerPortSetRequest {
+    uint32 new_port = 1;
+}
+
+message BrokerPortSetResponse {
+    bool   success = 1;
+    string error_msg = 2;
+    uint32 new_port = 3;
+}
+
+// ── Broker Name & Port Configuration ───────────────────────────────────────
+message BrokerConfigSetRequest {
+    string broker_name = 1;
+    uint32 new_port    = 2;
+}
+
+message BrokerConfigSetResponse {
+    bool   success     = 1;
+    string error_msg   = 2;
+    string broker_name = 3;
+    uint32 new_port    = 4;
+}
+
+// ── Broker Updates Manager ───────────────────────────────────────────────
+message BrokerUpdatePackage {
+    string filename = 1;
+    string version = 2;
+    uint64 size = 3;
+    uint64 timestamp = 4;
+}
+
+message BrokerUpdatesListRequest {
+}
+
+message BrokerUpdatesListResponse {
+    repeated BrokerUpdatePackage packages = 1;
+}
+
+message BrokerUpdatesDeleteRequest {
+    repeated string filenames = 1;
+}
+
+message BrokerUpdatesDeleteResponse {
+    bool success = 1;
+    string error_msg = 2;
+    repeated string deleted_filenames = 3;
+}
+
+// ── Log Görüntüleyici Mesajları ───────────────────────────────────────────
+message LogTailRequest {
+    int32  max_lines     = 1;  // Kaç satır (örn. 100, 200, 500, 1000, 2000, 0 = tümü)
+    string from_time     = 2;  // "yyyy-MM-dd hh:mm:ss" veya "hh:mm:ss"
+    string to_time       = 3;  // "yyyy-MM-dd hh:mm:ss" veya "hh:mm:ss"
+    string level_filter  = 4;  // "ERROR", "WARN", "INFO", "AUDIT", "DEBUG"
+    string search_query  = 5;  // Canlı arama metni
+    string target_file   = 6;  // Dosya adı (boşsa aktif log)
+}
+
+message LogTailResponse {
+    bool     success       = 1;
+    string   error_message = 2;
+    string   file_name     = 3;
+    int64    file_size     = 4;
+    repeated string lines  = 5;
+    repeated string available_files = 6;
+}
+
+// ── Windows İstemci Kaldırma Koruması Mesajları ─────────────────────
+message AgentUninstallPassSet {
+    string password_hash = 1;
+}
+
+message AgentUninstallPassResponse {
+    bool   success   = 1;
+    string error_msg = 2;
+}
+
+// ── Akıllı Tahta (Tip 3) Kilit ve Öğretmen Tohum Mesajları ─────────
+message TeacherKeyItem {
+    string teacher_id   = 1; // Benzersiz UUID / ID
+    string display_name = 2; // Ad Soyad
+    string username     = 3; // Linux/Windows OS kullanıcı adı (örn: ogretmen_ahmet)
+    string seed_hex     = 4; // 32-bayt HMAC tohumu (Hex encoded)
+    string password     = 5; // İlk kullanıcı oluşturma parolası (isteğe bağlı)
+}
+
+message TeacherKeySyncReq {
+    repeated TeacherKeyItem teachers = 1;
+}
+
+message TeacherKeySyncRes {
+    bool   success      = 1;
+    string error_msg    = 2;
+    uint32 synced_count = 3;
+}
+
+message SmartboardLockPinReport {
+    string client_id         = 1; // Tahtanın kimliği
+    string current_pin       = 2; // Aktif 6 haneli test PIN kodu
+    uint32 remaining_seconds = 3; // PIN geçerlilik süresi (0-30s)
+    uint64 timestamp         = 4; // Epoch
+}
+
+message SmartboardUnlockNotify {
+    string client_id    = 1;
+    string username     = 2; // Oturum açan öğretmen
+    string display_name = 3;
+    uint64 timestamp    = 4;
+    string password     = 5;
+}
+
+message DbTeacherUpsertRequest {
+    string teacher_id   = 1;
+    string username     = 2;
+    string display_name = 3;
+    string branch       = 4;
+    string seed_hex     = 5;
+    bool   is_active    = 6;
+    string password     = 7; // İlk kullanıcı oluşturma parolası (isteğe bağlı)
+}
+
+message DbTeacherUpsertResponse {
+    bool   success   = 1;
+    string error_msg = 2;
+}
+
+// ── Akıllı Tahta Yerel Kullanıcı Tarama Mesajları ──────────────────
+message QueryLocalUsersReq {
+    string client_id = 1;
+}
+
+message LocalUserInfo {
+    string username     = 1;
+    string display_name = 2; // GECOS
+    uint32 uid          = 3;
+    string home_dir     = 4;
+}
+
+message QueryLocalUsersRes {
+    string client_id               = 1;
+    bool   success                 = 2;
+    string error_msg               = 3;
+    repeated LocalUserInfo users   = 4;
+}
+
+
+message DbTeacherDeleteRequest {
+    string teacher_id = 1;
+}
+
+message DbTeacherDeleteResponse {
+    bool   success   = 1;
+    string error_msg = 2;
+}
+
+message DbUserUpdateRequest {
+    string user_id           = 1;
+    string display_name      = 2;
+    string role              = 3;
+    string password_hash     = 4; // Boşsa şifre değişmez
+    bool   is_backup_replica = 5;
+    string replica_machine_id = 6; // Yedek replikasyon cihaz kimliği (opsiyonel)
+    string replica_hostname   = 7; // Yedek replikasyon cihaz adı (opsiyonel)
+}
+
+message DbUserUpdateResponse {
+    bool   success   = 1;
+    string error_msg = 2;
+}
+
+message UserRoleChangedNotify {
+    string user_id      = 1;
+    string new_role     = 2; // "YM", "OM", "GM"
+    string display_name = 3;
+    string message      = 4;
+}
+
+message RollbackToStableRequest {
+    string client_id      = 1;
+    string target_version = 2; // Hedef kararlı sürüm (örn. broker sürümü)
+}
+
+message RollbackToStableResponse {
+    bool   success          = 1;
+    string error_msg        = 2;
+    string restored_version = 3;
+}
+
+message CommandExec {
+    string command_id = 1;
+    string command    = 2;
+}
+
+message CommandResult {
+    string command_id    = 1;
+    bool   success       = 2;
+    string error_message = 3;
+}
+
+// ── Kullanıcı Tanımlı Özel Ajan Profilleri (Maskeli Öğrenci PC) ────────────
+message CustomProfileItem {
+    int32  id           = 1;
+    string name         = 2;
+    bool   play_bell    = 3;
+    bool   recess_lock  = 4;
+    bool   chat_enabled = 5;
+    string icon_name    = 6;
+}
+
+message CustomProfileUpsertReq {
+    CustomProfileItem profile = 1;
+}
+
+message CustomProfileUpsertRes {
+    bool   success   = 1;
+    string error_msg = 2;
+    int32  id        = 3;
+}
+
+message CustomProfileDeleteReq {
+    int32  profile_id = 1;
+}
+
+message CustomProfileDeleteRes {
+    bool   success   = 1;
+    string error_msg = 2;
+}
+
+

@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=OKIDIA Öğrenci Tray
+Comment=OKIDIA ağ yönetim sistemi öğrenci arayüzü
+Exec=/usr/bin/okidia-tray
+Icon=okidia-agent
+Terminal=false
+NoDisplay=true
+Hidden=false
+X-GNOME-Autostart-enabled=true
+X-GNOME-Autostart-Delay=3

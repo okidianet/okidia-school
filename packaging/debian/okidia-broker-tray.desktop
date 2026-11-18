@@ -1,0 +1,13 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=OKIDIA Broker Tray
+GenericName=Broker Durum Göstergesi
+Comment=OKIDIA Broker durum tepsisi — otomatik başlar
+Exec=okidia-broker-tray
+Icon=okidia-broker
+Terminal=false
+Categories=System;Network;
+Keywords=okidia;broker;tray;
+NoDisplay=true
+X-GNOME-Autostart-enabled=true

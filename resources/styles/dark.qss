@@ -1,0 +1,252 @@
+/* OKIDIA — Koyu Tema (Catppuccin Mocha) */
+
+QMainWindow, QWidget {
+    background-color: #1e1e2e;
+    color: #cdd6f4;
+    font-family: "Segoe UI", "Noto Sans", sans-serif;
+    font-size: 13px;
+}
+
+QMainWindow::separator {
+    background: #313244;
+    width: 1px;
+    height: 1px;
+}
+
+QMenuBar {
+    background-color: #181825;
+    color: #cdd6f4;
+    border-bottom: 1px solid #313244;
+}
+QMenuBar::item:selected { background: #313244; }
+QMenu {
+    background: #1e1e2e;
+    border: 1px solid #313244;
+    border-radius: 6px;
+    padding: 4px;
+}
+QMenu::item { padding: 5px 24px 5px 12px; border-radius: 4px; }
+QMenu::item:selected { background: #313244; }
+QMenu::separator { height: 1px; background: #313244; margin: 4px 8px; }
+
+QSplitter::handle { background: #313244; }
+QSplitter::handle:horizontal { width: 1px; }
+QSplitter::handle:vertical   { height: 1px; }
+
+QDockWidget { color: #cdd6f4; }
+QDockWidget::title {
+    background: #181825;
+    border-bottom: 1px solid #313244;
+    padding: 4px 8px;
+    font-weight: 500;
+}
+QDockWidget::close-button, QDockWidget::float-button {
+    background: transparent;
+    border: none;
+    padding: 2px;
+    border-radius: 3px;
+}
+QDockWidget::close-button:hover, QDockWidget::float-button:hover {
+    background: #313244;
+}
+
+QTabWidget::pane { border: none; background: #1e1e2e; }
+QTabBar { background: #181825; }
+QTabBar::tab {
+    background: transparent;
+    color: #6c7086;
+    padding: 5px 14px;
+    border-bottom: 2px solid transparent;
+    font-size: 12px;
+}
+QTabBar::tab:selected {
+    color: #89b4fa;
+    border-bottom: 2px solid #89b4fa;
+}
+QTabBar::tab:hover:!selected { color: #cdd6f4; }
+
+QTreeWidget {
+    background: #181825;
+    border: none;
+    color: #cdd6f4;
+    alternate-background-color: #1e1e2e;
+}
+QTreeWidget::item { padding: 4px 2px; border-radius: 4px; }
+QTreeWidget::item:selected {
+    background: rgba(137,180,250,0.20);
+    color: #89b4fa;
+}
+QTreeWidget::item:hover:!selected { background: rgba(255,255,255,0.05); }
+QTreeWidget::branch:selected { background: rgba(137,180,250,0.12); }
+
+QListWidget {
+    background: #181825;
+    border: 1px solid #313244;
+    border-radius: 6px;
+    color: #cdd6f4;
+    outline: none;
+}
+QListWidget::item { padding: 5px 8px; border-radius: 4px; margin: 1px 2px; }
+QListWidget::item:selected {
+    background: rgba(137,180,250,0.20);
+    color: #89b4fa;
+}
+QListWidget::item:hover:!selected { background: rgba(255,255,255,0.05); }
+
+QPushButton {
+    background: #313244;
+    color: #cdd6f4;
+    border: 1px solid #45475a;
+    border-radius: 5px;
+    padding: 4px 12px;
+    font-size: 12px;
+}
+QPushButton:hover { background: #45475a; border-color: #585b70; }
+QPushButton:pressed { background: #585b70; }
+QPushButton:disabled { color: #585b70; }
+
+QLineEdit, QTextEdit {
+    background: #313244;
+    color: #cdd6f4;
+    border: 1px solid #45475a;
+    border-radius: 5px;
+    padding: 4px 8px;
+    selection-background-color: rgba(137,180,250,0.30);
+}
+QLineEdit:focus, QTextEdit:focus { border-color: #89b4fa; }
+
+QComboBox {
+    background: #313244;
+    color: #cdd6f4;
+    border: 1px solid #45475a;
+    border-radius: 5px;
+    padding: 3px 8px;
+}
+QComboBox:hover { border-color: #585b70; }
+QComboBox::drop-down { border: none; width: 20px; }
+QComboBox QAbstractItemView {
+    background: #1e1e2e;
+    border: 1px solid #45475a;
+    border-radius: 6px;
+    selection-background-color: rgba(137,180,250,0.20);
+    color: #cdd6f4;
+}
+
+QScrollBar:vertical {
+    background: transparent;
+    width: 8px;
+    margin: 0;
+}
+QScrollBar::handle:vertical {
+    background: #45475a;
+    border-radius: 4px;
+    min-height: 24px;
+}
+QScrollBar::handle:vertical:hover { background: #585b70; }
+QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }
+QScrollBar:horizontal {
+    background: transparent;
+    height: 8px;
+}
+QScrollBar::handle:horizontal {
+    background: #45475a;
+    border-radius: 4px;
+    min-width: 24px;
+}
+QScrollBar::handle:horizontal:hover { background: #585b70; }
+QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal { width: 0; }
+
+QStatusBar {
+    background: #181825;
+    border-top: 1px solid #313244;
+    color: #6c7086;
+    font-size: 12px;
+}
+
+QSlider::groove:horizontal {
+    height: 4px;
+    background: #45475a;
+    border-radius: 2px;
+}
+QSlider::handle:horizontal {
+    background: #89b4fa;
+    width: 14px; height: 14px;
+    border-radius: 7px;
+    margin: -5px 0;
+}
+QSlider::sub-page:horizontal { background: #89b4fa; border-radius: 2px; }
+
+QSpinBox {
+    background: #313244;
+    border: 1px solid #45475a;
+    border-radius: 5px;
+    padding: 3px 6px;
+    color: #cdd6f4;
+}
+
+QToolTip {
+    background: #313244;
+    color: #cdd6f4;
+    border: 1px solid #45475a;
+    border-radius: 5px;
+    padding: 4px 8px;
+    font-size: 12px;
+}
+
+/* ── Sohbet Paneli ────────────────────────────────────────────────────────── */
+/* Oda / üye listeleri */
+QListWidget#roomList,
+QListWidget#memberList {
+    background: #181825;
+    color: #cdd6f4;
+    font-size: 12px;
+    border: none;
+    outline: none;
+}
+QListWidget#roomList::item {
+    padding: 7px 10px;
+    border-radius: 5px;
+    margin: 1px 4px;
+}
+QListWidget#roomList::item:selected {
+    background: #313244;
+    color: #cdd6f4;
+}
+QListWidget#roomList::item:hover:!selected {
+    background: rgba(49,50,68,0.5);
+}
+QListWidget#memberList::item {
+    padding: 4px 10px;
+    font-size: 12px;
+}
+/* Mesaj alanı */
+QTextBrowser#messageArea {
+    background: #1e1e2e;
+    border: none;
+    font-size: 13px;
+}
+/* Giriş kutusu */
+QLineEdit#inputLine {
+    background: #313244;
+    border: 1px solid #45475a;
+    border-radius: 8px;
+    color: #cdd6f4;
+    padding: 6px 10px;
+    font-size: 13px;
+}
+QLineEdit#inputLine:focus {
+    border-color: #89b4fa;
+}
+/* Splitter */
+QSplitter#mainSplitter::handle {
+    background: #313244;
+    width: 1px;
+}
+/* Başlık etiketleri */
+QLabel#lblRooms, QLabel#lblMembers, QLabel#lblRoomTitle {
+    background: #181825;
+    color: #a6adc8;
+}
+/* Sol panel arka planı */
+QWidget#leftPane { background: #181825; }
+QWidget#rightPane { background: #1e1e2e; }

@@ -1,0 +1,13 @@
+[Unit]
+Description=OKIDIA Agent Otonom Hata Kurtarma ve Rollback Servisi (Self-Healing)
+Documentation=https://www.okidia.net
+After=network.target
+
+[Service]
+Type=oneshot
+User=root
+ExecStart=/usr/bin/okidia-agent-recover.sh
+TimeoutSec=180
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=okidia-agent-recover

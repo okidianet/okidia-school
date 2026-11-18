@@ -1,0 +1,122 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<ui version="4.0">
+ <class>ExamDialog</class>
+ <widget class="QDialog" name="ExamDialog">
+  <property name="geometry">
+   <rect><x>0</x><y>0</y><width>380</width><height>280</height></rect>
+  </property>
+  <property name="windowTitle"><string>Sınav / Ödev Başlat</string></property>
+  <layout class="QVBoxLayout" name="mainLayout">
+   <property name="leftMargin"><number>16</number></property>
+   <property name="topMargin"><number>16</number></property>
+   <property name="rightMargin"><number>16</number></property>
+   <property name="bottomMargin"><number>12</number></property>
+   <property name="spacing"><number>10</number></property>
+
+   <item>
+    <layout class="QFormLayout" name="formLayout">
+     <item row="0" column="0">
+      <widget class="QLabel" name="lblTitle">
+       <property name="text"><string>Başlık:</string></property>
+      </widget>
+     </item>
+     <item row="0" column="1">
+      <widget class="QLineEdit" name="titleEdit">
+       <property name="placeholderText"><string>Örn: Matematik Sınavı 1</string></property>
+      </widget>
+     </item>
+     <item row="1" column="0">
+      <widget class="QLabel" name="lblDuration">
+       <property name="text"><string>Süre (dk):</string></property>
+      </widget>
+     </item>
+     <item row="1" column="1">
+      <layout class="QHBoxLayout">
+       <item>
+        <widget class="QSpinBox" name="durationSpin">
+         <property name="minimum"><number>0</number></property>
+         <property name="maximum"><number>300</number></property>
+         <property name="value"><number>40</number></property>
+         <property name="specialValueText"><string>Süresiz</string></property>
+        </widget>
+       </item>
+       <item>
+        <widget class="QLabel" name="lblDurationHint">
+         <property name="text"><string>dk  (0 = süresiz)</string></property>
+         <property name="styleSheet"><string>color: #888;</string></property>
+        </widget>
+       </item>
+      </layout>
+     </item>
+    </layout>
+   </item>
+
+   <item>
+    <widget class="QGroupBox" name="restrictGroup">
+     <property name="title"><string>Kısıtlamalar</string></property>
+     <layout class="QVBoxLayout">
+      <property name="spacing"><number>4</number></property>
+      <item>
+       <widget class="QCheckBox" name="chkLockScreen">
+        <property name="text"><string>Ekranı kilitle (başlarken)</string></property>
+       </widget>
+      </item>
+      <item>
+       <widget class="QCheckBox" name="chkLockInput">
+        <property name="text"><string>Klavye/mouse kilitle</string></property>
+       </widget>
+      </item>
+      <item>
+       <widget class="QCheckBox" name="chkBlockWeb">
+        <property name="text"><string>İnterneti engelle</string></property>
+       </widget>
+      </item>
+     </layout>
+    </widget>
+   </item>
+
+   <item>
+    <spacer>
+     <property name="orientation"><enum>Qt::Vertical</enum></property>
+     <property name="sizeHint" stdset="0"><size><width>20</width><height>10</height></size></property>
+    </spacer>
+   </item>
+
+   <item>
+    <layout class="QHBoxLayout">
+     <item>
+      <spacer>
+       <property name="orientation"><enum>Qt::Horizontal</enum></property>
+       <property name="sizeHint" stdset="0"><size><width>40</width><height>20</height></size></property>
+      </spacer>
+     </item>
+     <item>
+      <widget class="QPushButton" name="btnCancel">
+       <property name="text"><string>İptal</string></property>
+      </widget>
+     </item>
+     <item>
+       <widget class="QPushButton" name="btnStart">
+        <property name="text"><string>Başlat</string></property>
+        <property name="default"><bool>true</bool></property>
+       </widget>
+     </item>
+    </layout>
+   </item>
+
+  </layout>
+ </widget>
+ <resources/>
+ <connections>
+  <connection>
+   <sender>btnCancel</sender><signal>clicked()</signal>
+   <receiver>ExamDialog</receiver><slot>reject()</slot>
+   <hints><hint type="sourcelabel"><x>260</x><y>260</y></hint><hint type="destinationlabel"><x>190</x><y>140</y></hint></hints>
+  </connection>
+  <connection>
+   <sender>btnStart</sender><signal>clicked()</signal>
+   <receiver>ExamDialog</receiver><slot>accept()</slot>
+   <hints><hint type="sourcelabel"><x>320</x><y>260</y></hint><hint type="destinationlabel"><x>190</x><y>140</y></hint></hints>
+  </connection>
+ </connections>
+</ui>

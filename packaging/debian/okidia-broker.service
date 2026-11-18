@@ -1,0 +1,40 @@
+[Unit]
+Description=OKIDIA Broker Servisi
+Documentation=https://www.okidia.net
+After=network-online.target avahi-daemon.service
+Wants=network-online.target avahi-daemon.service
+Requires=avahi-daemon.service
+
+[Service]
+Type=simple
+User=root
+
+# Headless servis — DISPLAY gerekmez.
+# Tray ayrı bir binary olarak kullanıcı oturumunda çalışır.
+EnvironmentFile=-/etc/okidia/broker.env
+
+# RuntimeDirectory: systemd /run/okidia'yı servis başlamadan önce oluşturur,
+# durduğunda temizler. ReadWritePaths içinde ayrıca belirtmeye gerek kalmaz.
+RuntimeDirectory=okidia
+RuntimeDirectoryMode=0755
+
+ExecStart=/usr/bin/okidia-broker
+ExecReload=/bin/kill -HUP $MAINPID
+
+Restart=always
+RestartSec=5
+TimeoutStartSec=30
+
+WorkingDirectory=/var/lib/okidia
+
+ReadWritePaths=/etc/okidia /var/log/okidia /var/lib/okidia
+
+# ca.srl için drop-in ile ekleniyor
+SupplementaryGroups=ssl-cert
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=okidia-broker
+
+[Install]
+WantedBy=multi-user.target

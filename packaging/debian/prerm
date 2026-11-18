@@ -1,0 +1,88 @@
+#!/bin/bash
+# prerm — OKIDIA kaldırma öncesi temizlik / Pre-removal cleanup
+# Hangi paketin kaldırıldığını DPKG_MAINTSCRIPT_PACKAGE ile tespit eder
+# ve sadece o pakete ait süreçleri durdurur.
+
+PACKAGE="${DPKG_MAINTSCRIPT_PACKAGE:-unknown}"
+
+LANG_ENV="${LC_ALL:-${LC_MESSAGES:-${LANG:-en}}}"
+IS_TR=0
+if [[ "$LANG_ENV" =~ ^tr || "$LANG_ENV" =~ ^TR ]]; then
+    IS_TR=1
+fi
+
+log() {
+    local tr_text="$1"
+    local en_text="$2"
+    if [ "$IS_TR" -eq 1 ]; then
+        echo "[OKIDIA] $tr_text"
+    else
+        echo "[OKIDIA] $en_text"
+    fi
+}
+
+case "$1" in
+  remove|upgrade|deconfigure)
+
+    # ── okidia-broker ──────────────────────────────────────────────────────
+    if echo "$PACKAGE" | grep -q "okidia-broker"; then
+        if command -v systemctl &>/dev/null; then
+            if systemctl is-active --quiet okidia-broker.service 2>/dev/null; then
+                systemctl stop okidia-broker.service || true
+                log "okidia-broker servisi durduruldu." \
+                    "okidia-broker service stopped."
+            fi
+            systemctl disable okidia-broker.service 2>/dev/null || true
+        fi
+        if command -v pkill &>/dev/null; then
+            pkill -TERM -f okidia-broker-tray 2>/dev/null || true
+            pkill -TERM -x okidia-broker-t 2>/dev/null || true
+            sleep 0.5
+            pkill -KILL -f okidia-broker-tray 2>/dev/null || true
+            pkill -KILL -x okidia-broker-t 2>/dev/null || true
+            log "okidia-broker-tray sonlandırıldı." \
+                "okidia-broker-tray terminated."
+        fi
+    fi
+
+    # ── okidia-agent ───────────────────────────────────────────────────────
+    if echo "$PACKAGE" | grep -q "okidia-agent"; then
+        if command -v systemctl &>/dev/null; then
+            if systemctl is-active --quiet okidia-agent-recover.service 2>/dev/null; then
+                systemctl stop okidia-agent-recover.service || true
+            fi
+            systemctl disable okidia-agent-recover.service 2>/dev/null || true
+
+            if systemctl is-active --quiet okidia-agent.service 2>/dev/null; then
+                systemctl stop okidia-agent.service || true
+                log "okidia-agent servisi durduruldu." \
+                    "okidia-agent service stopped."
+            fi
+            systemctl disable okidia-agent.service 2>/dev/null || true
+        fi
+        if command -v pkill &>/dev/null; then
+            pkill -TERM -x okidia-agent 2>/dev/null || true
+            pkill -TERM -x okidia-tray 2>/dev/null || true
+            sleep 0.5
+            pkill -KILL -x okidia-agent 2>/dev/null || true
+            pkill -KILL -x okidia-tray 2>/dev/null || true
+            log "okidia-agent ve okidia-tray sonlandırıldı." \
+                "okidia-agent and okidia-tray terminated."
+        fi
+    fi
+
+    # ── okidia-master ──────────────────────────────────────────────────────
+    if echo "$PACKAGE" | grep -q "okidia-master"; then
+        if command -v pkill &>/dev/null; then
+            pkill -TERM -x okidia-master 2>/dev/null || true
+            sleep 0.8
+            pkill -KILL -x okidia-master 2>/dev/null || true
+            log "okidia-master sonlandırıldı." \
+                "okidia-master terminated."
+        fi
+    fi
+
+    ;;
+esac
+
+exit 0

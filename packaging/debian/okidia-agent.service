@@ -1,0 +1,50 @@
+[Unit]
+Description=OKIDIA Öğrenci Ajanı
+Documentation=https://www.okidia.net
+After=network-online.target avahi-daemon.service display-manager.service
+Wants=network-online.target avahi-daemon.service
+OnFailure=okidia-agent-recover.service
+StartLimitIntervalSec=60
+StartLimitBurst=4
+
+[Service]
+Type=simple
+User=root
+
+# RuntimeDirectory: systemd /run/okidia dizinini 0755 ile otomatik oluşturur ve yönetir.
+RuntimeDirectory=okidia
+RuntimeDirectoryMode=0755
+
+ExecStart=/usr/bin/okidia-agent --daemon
+
+Environment=DISPLAY=:0
+
+# XAUTHORITY: önce lightdm/sddm login ekranı, yoksa kullanıcı oturumu
+# agent içinde dinamik olarak da güncelleniyor (her 3sn)
+ExecStartPre=/bin/sh -c '\
+    for f in /var/run/lightdm/root/:0 /run/lightdm/root/:0 \
+              /var/lib/lightdm/.Xauthority /run/sddm/.Xauthority; do \
+        [ -r "$f" ] && echo "XAUTHORITY=$f" > /etc/okidia/agent.env && break; \
+    done; \
+    [ -f /etc/okidia/agent.env ] || \
+        find /home -maxdepth 2 -name .Xauthority 2>/dev/null | head -1 | \
+        xargs -I{} echo "XAUTHORITY={}" > /etc/okidia/agent.env; \
+    true'
+
+EnvironmentFile=-/etc/okidia/agent.env
+
+# Her zaman yeniden başlat — login/logout döngüsünde ayakta kalır
+Restart=always
+RestartSec=5
+TimeoutStartSec=60
+
+WorkingDirectory=/var/lib/okidia
+
+ReadWritePaths=/etc/okidia /var/log/okidia /var/lib/okidia /tmp /run/okidia -/run/user
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=okidia-agent
+
+[Install]
+WantedBy=multi-user.target

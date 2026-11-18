@@ -1,0 +1,13 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=OKIDIA Master
+GenericName=Sınıf Yönetim Sistemi
+Comment=Okul içi denetim ve iletişim ağı — yönetici/öğretmen arayüzü
+Exec=okidia-master
+Icon=okidia-master
+Terminal=false
+Categories=Education;Network;Monitor;
+Keywords=okidia;sınıf;yönetim;öğretmen;pardus;etap;
+StartupNotify=true
+StartupWMClass=okidia-master

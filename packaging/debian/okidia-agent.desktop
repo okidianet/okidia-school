@@ -1,0 +1,12 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=OKIDIA Agent
+GenericName=Sınıf Yönetim Ajanı
+Comment=OKIDIA istemci ajanı — normalde systemd tarafından otomatik başlatılır
+Exec=okidia-agent
+Icon=okidia-agent
+Terminal=false
+Categories=System;Network;
+Keywords=okidia;agent;ajan;öğrenci;pardus;etap;
+NoDisplay=true

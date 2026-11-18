@@ -1,0 +1,84 @@
+#!/bin/bash
+# postrm — OKIDIA tam kaldırma sonrası / Post-removal cleanup
+
+set -e
+
+LANG_ENV="${LC_ALL:-${LC_MESSAGES:-${LANG:-en}}}"
+IS_TR=0
+if [[ "$LANG_ENV" =~ ^tr || "$LANG_ENV" =~ ^TR ]]; then
+    IS_TR=1
+fi
+
+log() {
+    local tr_text="$1"
+    local en_text="$2"
+    if [ "$IS_TR" -eq 1 ]; then
+        echo "[OKIDIA] $tr_text"
+    else
+        echo "[OKIDIA] $en_text"
+    fi
+}
+
+case "$1" in
+  purge)
+    # purge: yapılandırma ve logları sil
+    rm -rf /etc/okidia /var/log/okidia /var/lib/okidia /etc/okidia/certs
+    
+    # postinst içinde dinamik olarak oluşturulan dosyaları temizle
+    rm -rf /usr/share/okidia
+    rm -rf /etc/systemd/system/okidia-broker.service.d
+    rm -f /etc/systemd/system/okidia-agent.service
+    rm -f /etc/systemd/system/okidia-agent-recover.service
+    rm -f /usr/bin/okidia-agent-recover.sh
+    rm -f /var/run/okidia_rollback_in_progress
+    if command -v systemctl &>/dev/null; then
+        systemctl daemon-reload || true
+        systemctl reset-failed okidia-agent.service 2>/dev/null || true
+        systemctl reset-failed okidia-agent-recover.service 2>/dev/null || true
+    fi
+
+    # Kullanıcı ev dizinlerindeki (ve /root) .config ve .local/share kalıntılarını temizle
+    for user_home in /home/* /root; do
+        if [ -d "$user_home" ]; then
+            rm -rf "$user_home/.config/okidia" \
+                   "$user_home/.config/Okidia" \
+                   "$user_home/.config/Unknown Organization" \
+                   "$user_home/.config/okidia.conf" \
+                   "$user_home/.config/okidia-master" \
+                   "$user_home/.config/okidia-agent" \
+                   "$user_home/.config/okidia-broker" \
+                   "$user_home/.config/okidia-tray" \
+                   "$user_home/.config/okidia-broker-tray" \
+                   "$user_home/.local/share/okidia" \
+                   "$user_home/.local/share/Okidia" \
+                   "$user_home/.local/share/okidia-master" \
+                   "$user_home/.local/share/okidia-agent" \
+                   "$user_home/.local/share/okidia-broker" \
+                   "$user_home/.local/share/okidia-tray" \
+                   "$user_home/.local/share/okidia-broker-tray"
+        fi
+    done
+    # Kullanıcıyı kaldır
+    if id okidia &>/dev/null; then
+        userdel okidia || true
+    fi
+    log "Tüm veriler ve yapılandırma temizlendi." \
+        "All configuration files and data have been purged."
+    ;;
+  remove)
+    log "Paket dosyaları başarıyla kaldırıldı." \
+        "Package files have been successfully removed."
+    log "Tüm yapılandırmayı ve sertifikaları silmek için: sudo apt purge okidia-*" \
+        "To remove all configuration and certificates: sudo apt purge okidia-*"
+    ;;
+esac
+
+# ── Masaüstü cache temizle ───────────────────────────────────────
+if command -v gtk-update-icon-cache &>/dev/null; then
+    gtk-update-icon-cache -f -t /usr/share/icons/hicolor/ 2>/dev/null || true
+fi
+if command -v update-desktop-database &>/dev/null; then
+    update-desktop-database /usr/share/applications/ 2>/dev/null || true
+fi
+
+exit 0
