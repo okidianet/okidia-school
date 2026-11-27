@@ -93,14 +93,23 @@ static HHOOK s_hMouseHook = nullptr;
 
 static LRESULT CALLBACK LowLevelKeyboardProc(int nCode, WPARAM wParam, LPARAM lParam) {
     if (nCode >= 0 && InputController::isInputLocked()) {
-        return 1; // Girişi yut
+        auto* p = reinterpret_cast<KBDLLHOOKSTRUCT*>(lParam);
+        // Master uzak kontrol kaynaklı (SendInput) enjekte olayları engelleme
+        if (p && (p->flags & LLKHF_INJECTED)) {
+            return CallNextHookEx(s_hKeyboardHook, nCode, wParam, lParam);
+        }
+        return 1; // Fiziksel girişi yut
     }
     return CallNextHookEx(s_hKeyboardHook, nCode, wParam, lParam);
 }
 
 static LRESULT CALLBACK LowLevelMouseProc(int nCode, WPARAM wParam, LPARAM lParam) {
     if (nCode >= 0 && InputController::isInputLocked()) {
-        return 1; // Girişi yut
+        auto* p = reinterpret_cast<MSLLHOOKSTRUCT*>(lParam);
+        if (p && (p->flags & LLMHF_INJECTED)) {
+            return CallNextHookEx(s_hMouseHook, nCode, wParam, lParam);
+        }
+        return 1; // Fiziksel girişi yut
     }
     return CallNextHookEx(s_hMouseHook, nCode, wParam, lParam);
 }

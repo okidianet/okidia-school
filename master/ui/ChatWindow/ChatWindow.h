@@ -87,6 +87,8 @@ private slots:
     void onPrivateMessageReceived(const QString& sessionId, const PrivateMessage& msg);
     void onPrivateRequestReceived(const PendingRequest& req);
     void onHandRaiseReceived     (const QString& clientId, const QString& message);
+    void onChatMuteStateReceived (const QString& clientId, const QString& username,
+                                  bool muted, qint64 mutedUntil, int violationLevel, const QString& reason);
 
     void onChatMessageReadyToSend(const QString& text);
     void onChatContextMenuRequested(const QString& msgId, const QPoint& pos);
@@ -145,4 +147,5 @@ private:
 
     bool m_blockedByLock = false;
     bool m_wantsShowAfterUnlock = false;
+    QMap<QString, qint64> m_mutedUsers; // "<clientId>:<username>" -> mutedUntil unix secs
 };

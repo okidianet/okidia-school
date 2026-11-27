@@ -142,7 +142,7 @@ void ChatWidget::setLocked(bool locked, const QString& reason)
     m_sendBtn->setDisabled(locked);
 
     if (locked) {
-        m_inputEdit->setPlaceholderText(reason.isEmpty() ? tr("🔇 Sohbet kilitli — mesaj gönderilemez") : "🔇 " + reason);
+        m_inputEdit->setPlaceholderText(reason.isEmpty() ? tr("Sohbet kilitli — mesaj gönderilemez") : reason);
     } else {
         m_inputEdit->setPlaceholderText(tr("Mesajınızı yazın... (Enter ↵, Satır atla: Shift+Enter)"));
     }
@@ -153,6 +153,18 @@ void ChatWidget::onSendClicked()
     if (m_locked) return;
     
     QString text = m_inputEdit->toPlainText().trimmed();
+    if (text.isEmpty()) return;
+
+    constexpr int kMaxChars = 500;
+    constexpr int kMaxNewlines = 5;
+    if (text.size() > kMaxChars) {
+        text = text.left(kMaxChars);
+    }
+    QStringList lines = text.split('\n');
+    if (lines.size() > kMaxNewlines + 1) {
+        lines = lines.mid(0, kMaxNewlines + 1);
+        text = lines.join('\n').trimmed();
+    }
     if (text.isEmpty()) return;
 
     m_inputEdit->clear();

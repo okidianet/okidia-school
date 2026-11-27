@@ -2,6 +2,9 @@
 #include "SmartboardLockOverlay.h"
 #include "../../auth/OfflineAuthManager.h"
 #include "../../system/SessionSwitchManager.h"
+#if !defined(Q_OS_WIN)
+#  include "../../capture/WaylandPortalCapture.h"
+#endif
 #include "../../../common/utils/QrCodeGenerator.h"
 #include "../../../common/utils/Logger.h"
 #include "../../../common/ui/ThemeManager.h"
@@ -29,6 +32,7 @@ static LRESULT CALLBACK SmartboardLockProc(int nCode, WPARAM wParam, LPARAM lPar
         if (p->vkCode == VK_LWIN || p->vkCode == VK_RWIN) return 1;
         if (isAlt && (p->vkCode == VK_TAB || p->vkCode == VK_ESCAPE || p->vkCode == VK_F4)) return 1;
         if ((GetAsyncKeyState(VK_CONTROL) & 0x8000) && p->vkCode == VK_ESCAPE) return 1;
+        if ((GetAsyncKeyState(VK_CONTROL) & 0x8000) && (GetAsyncKeyState(VK_SHIFT) & 0x8000) && p->vkCode == VK_ESCAPE) return 1;
     }
     return CallNextHookEx(s_hSmartboardLockHook, nCode, wParam, lParam);
 }
@@ -45,7 +49,7 @@ SmartboardLockOverlay::SmartboardLockOverlay(QWidget* parent)
             | Qt::FramelessWindowHint
             | Qt::WindowStaysOnTopHint
 #if !defined(Q_OS_WIN)
-            | Qt::X11BypassWindowManagerHint
+            | (WaylandPortalCapture::isWaylandSession() ? Qt::WindowFlags() : Qt::WindowFlags(Qt::X11BypassWindowManagerHint))
 #endif
             ) {
     setAttribute(Qt::WA_DeleteOnClose, false);
@@ -256,6 +260,10 @@ void SmartboardLockOverlay::onScreenRemoved(QScreen* screen) {
 void SmartboardLockOverlay::updateAllScreens() {
     if (!m_locked) return;
 
+#if !defined(Q_OS_WIN)
+    WaylandPortalCapture::setGnomeLockdown(true);
+#endif
+
     QList<QScreen*> screens = QApplication::screens();
     if (screens.isEmpty()) return;
 
@@ -270,6 +278,10 @@ void SmartboardLockOverlay::updateAllScreens() {
             showFullScreen();
         }
         raise();
+#if defined(Q_OS_WIN)
+        SetWindowPos(reinterpret_cast<HWND>(winId()), HWND_TOPMOST, 0, 0, 0, 0,
+                     SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+#endif
     }
 
     // 2. İkincil Ekranlar (Projeksiyon / HDMI Monitör):
@@ -295,7 +307,7 @@ void SmartboardLockOverlay::updateAllScreens() {
         QWidget* extra = new QWidget(nullptr,
             Qt::Window | Qt::FramelessWindowHint | Qt::WindowStaysOnTopHint
 #if !defined(Q_OS_WIN)
-            | Qt::X11BypassWindowManagerHint
+            | (WaylandPortalCapture::isWaylandSession() ? Qt::WindowFlags() : Qt::WindowFlags(Qt::X11BypassWindowManagerHint))
 #endif
         );
         extra->setStyleSheet("background-color: #0d1117; color: #ffffff;");
@@ -425,7 +437,9 @@ void SmartboardLockOverlay::showSmartboardLock(const QString& message) {
     if (!s_hSmartboardLockHook) {
         s_hSmartboardLockHook = SetWindowsHookEx(WH_KEYBOARD_LL, SmartboardLockProc, GetModuleHandle(nullptr), 0);
     }
+    SetThreadExecutionState(ES_CONTINUOUS | ES_DISPLAY_REQUIRED | ES_SYSTEM_REQUIRED);
 #else
+    WaylandPortalCapture::setGnomeLockdown(true);
     // Linux: Eğer OS/LightDM ekranı daha önceden kilitlenmişse, önce kilidi serbest bırak
     QProcess::startDetached("loginctl", {"unlock-session"});
     QProcess::startDetached("light-locker-command", {"-a"});
@@ -476,7 +490,9 @@ void SmartboardLockOverlay::showSmartboardLock(const QString& message) {
     bool usbProtection = QSettings("okidia", "agent").value("policy/usb_protection_enabled", false).toBool()
                       || OkidiaConfig::isUsbProtectionEnabled();
     if (usbProtection) {
+#if !defined(Q_OS_WIN)
         QProcess::startDetached("sync", {});
+#endif
         if (m_btnEjectUsb) {
             auto drives = SystemInfo::mountedUsbDrives();
             if (!drives.isEmpty()) {
@@ -516,7 +532,9 @@ void SmartboardLockOverlay::hideSmartboardLock() {
         UnhookWindowsHookEx(s_hSmartboardLockHook);
         s_hSmartboardLockHook = nullptr;
     }
+    SetThreadExecutionState(ES_CONTINUOUS);
 #else
+    WaylandPortalCapture::setGnomeLockdown(false);
     // Linux: Ekran koruyucuları ve light-locker'ı tekrar devam ettir (SIGCONT)
     QProcess::startDetached("pkill", {"-CONT", "light-locker"});
     QProcess::startDetached("pkill", {"-CONT", "xfce4-screensaver"});

@@ -258,6 +258,13 @@ void TlsClient::disconnectFromServer() {
     if (m_socket) { m_socket->disconnect(); m_socket->abort(); }
 }
 
+void TlsClient::clearTargetHost() {
+    m_reconnectTimer->stop();
+    m_handshakeTimer->stop();
+    m_host.clear();
+    m_port = 0;
+}
+
 bool TlsClient::isConnected() const {
     return m_connection && m_connection->isConnected();
 }

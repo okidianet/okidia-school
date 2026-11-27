@@ -36,6 +36,10 @@ public:
                    const QString& destination = "",
                    const QString& overrideFilename = "");
 
+    // Devam eden transferi anında iptal et
+    void cancel();
+    uint64_t sequenceId() const { return m_sequenceId; }
+
 signals:
     void progress(int percent);
     void finished(bool success, const QString& filename);

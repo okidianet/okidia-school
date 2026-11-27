@@ -8,6 +8,7 @@
 #include <QCheckBox>
 #include <QGroupBox>
 #include <QTimer>
+#include <QProgressBar>
 #include <QMediaPlayer>
 #include <QAudioOutput>
 #include <QStringList>
@@ -75,6 +76,7 @@ private:
     class QToolButton* m_btnRefreshMics = nullptr;
     class QMediaDevices* m_mediaDevices = nullptr;
     QLabel*       m_timeLbl            = nullptr;
+    QProgressBar* m_levelBar           = nullptr;
 
     // Butonlar
     QPushButton* m_btnKaydet  = nullptr;
@@ -89,4 +91,6 @@ private:
     QTimer*       m_recordTimer = nullptr;
     QMediaPlayer* m_player      = nullptr;
     QAudioOutput* m_audio       = nullptr;
+    class QAudioSink* m_previewSink = nullptr;
+    class QBuffer*    m_previewBuf  = nullptr;
 };

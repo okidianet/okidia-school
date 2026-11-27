@@ -108,11 +108,11 @@ SshFileManagerWidget::SshFileManagerWidget(SessionManager* session, QWidget* par
                 rootPath = "C:/";
                 QString userProfile = m_client->executeSync("cmd.exe /c echo %USERPROFILE%", 3000).trimmed();
                 if (!userProfile.isEmpty() && !userProfile.contains("%USERPROFILE%")) {
-                    homePath = QDir::fromNativeSeparators(userProfile);
+                    homePath = OkidiaUtils::fromRemotePathSeparators(userProfile);
                 } else {
                     QString psHome = m_client->executeSync("powershell -NoProfile -Command \"$HOME\"", 3000).trimmed();
                     if (!psHome.isEmpty() && psHome.contains(":")) {
-                        homePath = QDir::fromNativeSeparators(psHome);
+                        homePath = OkidiaUtils::fromRemotePathSeparators(psHome);
                     } else {
                         homePath = "C:/Users";
                     }

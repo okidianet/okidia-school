@@ -50,6 +50,7 @@ struct BrokerContext {
     std::function<void()> broadcastDbSyncSignal;
     std::function<void(const QString&)> pushLatestBackupToUser;
     std::function<void(const QString&)> reconcileAgentState;
+    std::function<void(const QString&)> syncChatMuteForClient;
     
     QString setupCode;
     

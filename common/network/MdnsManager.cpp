@@ -89,8 +89,8 @@ static int interfacePriority(const QNetworkInterface& iface) {
 static int ipPriority(const QString& ipStr) {
     if (ipStr.isEmpty() || ipStr.startsWith("127.")) return 1;
 
-    // VirtualBox Host-Only varsayılan ağı (192.168.56.x)
-    if (ipStr.startsWith("192.168.56.")) return 2;
+    // VirtualBox Host-Only varsayılan ağı (192.168.56.x) ve libvirt/KVM (192.168.122.x)
+    if (ipStr.startsWith("192.168.56.") || ipStr.startsWith("192.168.122.")) return 2;
 
     // Docker / WSL varsayılanları (172.17.x, 172.18.x)
     if (ipStr.startsWith("172.17.") || ipStr.startsWith("172.18.") || ipStr.startsWith("172.19.") || ipStr.startsWith("172.20.")) return 2;

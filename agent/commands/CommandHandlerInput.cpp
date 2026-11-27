@@ -3,6 +3,9 @@
 #include "../../common/utils/Logger.h"
 #include "../input/InputController.h"
 #include "../capture/ScreenCapture.h"
+#if !defined(Q_OS_WIN)
+#  include "../capture/WaylandPortalCapture.h"
+#endif
 #include "../system/SystemInfo.h"
 
 #ifdef HAVE_XTST
@@ -12,6 +15,13 @@
 #endif
 void CommandHandler::inputLock() {
     Logger::info(QObject::tr("CommandHandler: Input kilitleniyor"));
+#if !defined(Q_OS_WIN)
+    if (WaylandPortalCapture::isWaylandSession()) {
+        Logger::info(QObject::tr("CommandHandler: Wayland oturumunda donanım girdi kilidi (evdev) servis tarafından uygulandı."));
+        sendResult(true, QObject::tr("Input kilitlendi (Wayland evdev)"));
+        return;
+    }
+#endif
     bool ok = InputController::lockInput();
     if (ok) {
         Logger::info(QObject::tr("CommandHandler: Input kilitlendi"));
@@ -41,6 +51,13 @@ void CommandHandler::inputLock() {
 
 void CommandHandler::inputUnlock() {
     Logger::info(QObject::tr("CommandHandler: Input kilidi açılıyor"));
+#if !defined(Q_OS_WIN)
+    if (WaylandPortalCapture::isWaylandSession()) {
+        Logger::info(QObject::tr("CommandHandler: Wayland oturumunda donanım girdi kilidi (evdev) servis tarafından kaldırıldı."));
+        sendResult(true, QObject::tr("Input kilidi açıldı (Wayland evdev)"));
+        return;
+    }
+#endif
     bool ok = InputController::unlockInput();
     sendResult(ok, ok ? QObject::tr("Input kilidi açıldı") : QObject::tr("Input kilidi açılamadı"));
 

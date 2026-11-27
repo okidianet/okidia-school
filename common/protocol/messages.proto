@@ -278,6 +278,13 @@ enum MessageType {
     CUSTOM_PROFILE_UPSERT_RES  = 318; // Broker → Master: Profil ekleme / güncelleme cevabı
     CUSTOM_PROFILE_DELETE_REQ  = 319; // Master(YM) → Broker: Özel profil sil
     CUSTOM_PROFILE_DELETE_RES  = 320; // Broker → Master: Profil silme cevabı
+
+    // ── Master Bilgisayar Envanteri Yönetimi (master_devices) ─
+    DB_MASTER_DEVICE_DEL_REQ   = 321; // Master(YM) → Broker: Kayıtlı Master bilgisayarını listeden sil
+    DB_MASTER_DEVICE_DEL_RES   = 322; // Broker → Master: Master bilgisayar silme sonucu
+
+    // ── Sohbet Susturma / Spam Koruması ───────────────────────
+    CHAT_MUTE_STATE            = 323; // Broker ↔ Agent / Master: kullanıcı bazlı sohbet susturma durumu
 }
 
 
@@ -312,6 +319,7 @@ message ClientInfo {
     string alias         = 16;
     string display_name  = 17; // Aktif kullanıcının görünen adı (Ad Soyad / GECOS / FullName)
     bool   rtc_battery_low = 18; // Donanım saati (RTC) / BIOS pili arıza uyarısı
+    string assets_fingerprint = 19; // Yerel zil/logo varlıklarının SHA-256 parmak izi
 }
 
 // Ekran
@@ -550,6 +558,7 @@ message AudioPlayLocalCommand {
     string anons_path   = 1;  // /tmp/okidia_anons_xxx.wav
     int32  repeat_count = 2;  // anons tekrar sayısı (varsayılan 1)
     bool   is_bell      = 3;  // true ise Zil (Popup ve DingDong atlanır), false ise Yönetici Anonsu
+    string announce_id  = 4;  // Anons benzersiz kimliği (iptal/durdurma eşleşmesi için)
 }
 
 // El kaldırma olayı (agent → master)
@@ -652,6 +661,8 @@ message AudioBroadcastCommand {
     uint32     volume      = 4;   // 0-100, 0 = değiştirme
     uint32     sample_rate = 5;   // LIVE modu: örnekleme hızı (Hz)
     uint32     channels    = 6;   // LIVE modu: kanal sayısı (1=mono)
+    string     announce_id = 7;   // Anons oturum kimliği (canlı yayın veya durdurma için)
+    uint32     seq         = 8;   // Canlı yayın paket sıra numarası
 }
 // ── Zaman Senkronizasyonu & Donanım Sağlığı ───────────────────
 message TimeSyncRequest {
@@ -954,6 +965,17 @@ message ChatLockState {
     string class_id      = 1;  // sınıf/grup UUID
     bool   chat_locked   = 2;  // true → sohbet odası kilitli
     bool   private_locked= 3;  // true → özel sohbet kilitli
+}
+
+// Kullanıcı bazlı sohbet susturma durumu (spam koruması veya öğretmen manuel susturması)
+message ChatMuteState {
+    string client_id       = 1;  // Agent machine_id / clientId
+    string username        = 2;  // Aktif OS kullanıcı adı
+    bool   muted           = 3;  // true → susturuldu, false → susturma kaldırıldı
+    uint64 muted_until     = 4;  // Unix timestamp (sn); 0 = kaldırıldı
+    uint32 duration_secs   = 5;  // Kısıtlama süresi (sn) — manuel susturma için
+    uint32 violation_level = 6;  // 1 (1 dk), 2 (5 dk), 3 (10 dk); 0 = manuel
+    string reason          = 7;  // Kullanıcıya gösterilecek açıklama
 }
 
 // Sınıf sohbetine misafir katılım izni isteği
@@ -1564,6 +1586,17 @@ message CustomProfileDeleteReq {
 }
 
 message CustomProfileDeleteRes {
+    bool   success   = 1;
+    string error_msg = 2;
+}
+
+// ── Master Bilgisayar Kaydı Silme (master_devices) ─────────────────────────
+message DbMasterDeviceDeleteReq {
+    string machine_id = 1;
+    string hostname   = 2;
+}
+
+message DbMasterDeviceDeleteRes {
     bool   success   = 1;
     string error_msg = 2;
 }

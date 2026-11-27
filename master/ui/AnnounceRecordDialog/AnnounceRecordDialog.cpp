@@ -17,8 +17,14 @@
 #include <QDir>
 #include <QMediaDevices>
 #include <QAudioDevice>
+#include <QAudioSink>
+#include <QAudioFormat>
+#include <QBuffer>
+#include <QtEndian>
 #include <QProcess>
 #include <QToolButton>
+#include <cmath>
+#include <vector>
 
 QString AnnounceRecordDialog::friendlyDeviceName(const QAudioDevice& dev) const {
     QString desc = dev.description().trimmed();
@@ -204,12 +210,29 @@ AnnounceRecordDialog::AnnounceRecordDialog(SessionManager* session,
     m_timeLbl = new QLabel("00:00", this);
     m_timeLbl->setAlignment(Qt::AlignCenter);
     QFont f = m_timeLbl->font();
-    f.setPointSize(28);
+    f.setPointSize(26);
     f.setBold(true);
     m_timeLbl->setFont(f);
     m_timeLbl->setProperty("status", "info");
     m_timeLbl->setVisible(false);
     lay->addWidget(m_timeLbl);
+
+    m_levelBar = new QProgressBar(this);
+    m_levelBar->setRange(0, 100);
+    m_levelBar->setValue(0);
+    m_levelBar->setTextVisible(false);
+    m_levelBar->setFixedHeight(10);
+    m_levelBar->setToolTip(tr("Canlı mikrofon ses seviyesi"));
+    m_levelBar->setVisible(false);
+    lay->addWidget(m_levelBar);
+
+    if (m_session) {
+        connect(m_session, &SessionManager::audioInputLevelChanged, this, [this](int pct) {
+            if (m_levelBar && m_state == State::Recording) {
+                m_levelBar->setValue(qBound(0, pct, 100));
+            }
+        });
+    }
 
     lay->addStretch();
 
@@ -320,6 +343,10 @@ void AnnounceRecordDialog::updateUI() {
     m_btnYayinla ->setVisible(false);
     m_repeatCombo->setVisible(false);
     m_timeLbl    ->setVisible(false);
+    if (m_levelBar) {
+        m_levelBar->setVisible(m_state == State::Recording);
+        if (m_state != State::Recording) m_levelBar->setValue(0);
+    }
 
     if (m_micCombo) {
         m_micCombo->setEnabled(m_state == State::Idle || m_state == State::Recorded);
@@ -416,6 +443,130 @@ void AnnounceRecordDialog::onDinleClicked() {
         m_statusLbl->setText(tr("Oynatılacak ses dosyası boş."));
         return;
     }
+
+    if (m_previewSink) {
+        m_previewSink->stop();
+        delete m_previewSink;
+        m_previewSink = nullptr;
+    }
+    if (m_previewBuf) {
+        m_previewBuf->close();
+        delete m_previewBuf;
+        m_previewBuf = nullptr;
+    }
+
+    // Dosyayı önce standart 16-bit PCM WAV'a çöz ve saf QAudioSink ile çal (Qt 6.4 QMediaPlayer sessizlik hatasını aşar)
+    QString errStr;
+    const QString normPath = SessionManager::normalizeAudioFileToWav(m_wavPath, &errStr);
+    const QString playPath = normPath.isEmpty() ? m_wavPath : normPath;
+
+    QFile wf(playPath);
+    if (wf.open(QIODevice::ReadOnly)) {
+        const QByteArray wavBytes = wf.readAll();
+        wf.close();
+        if (playPath != m_wavPath && playPath.startsWith(QDir::tempPath())) {
+            QFile::remove(playPath);
+        }
+
+        if (wavBytes.size() > 44 && wavBytes.startsWith("RIFF") && wavBytes.mid(8, 4) == "WAVE") {
+            int idx = 12;
+            quint16 wavCh = 1;
+            quint32 wavSr = 24000;
+            quint16 wavBits = 16;
+            int dataOff = 0;
+            int dataLen = 0;
+            while (idx + 8 <= wavBytes.size()) {
+                QByteArray cid = wavBytes.mid(idx, 4);
+                quint32 csz = qFromLittleEndian<quint32>(reinterpret_cast<const uchar*>(wavBytes.constData() + idx + 4));
+                if (cid == "fmt " && csz >= 16) {
+                    wavCh   = qFromLittleEndian<quint16>(reinterpret_cast<const uchar*>(wavBytes.constData() + idx + 10));
+                    wavSr   = qFromLittleEndian<quint32>(reinterpret_cast<const uchar*>(wavBytes.constData() + idx + 12));
+                    wavBits = qFromLittleEndian<quint16>(reinterpret_cast<const uchar*>(wavBytes.constData() + idx + 22));
+                } else if (cid == "data") {
+                    dataOff = idx + 8;
+                    dataLen = qMin<int>(csz, wavBytes.size() - dataOff);
+                    break;
+                }
+                idx += 8 + csz;
+            }
+
+            if (dataOff > 0 && dataLen > 0 && wavBits == 16 && wavSr > 0 && wavCh > 0) {
+                const QAudioDevice outDev = QMediaDevices::defaultAudioOutput();
+                QAudioFormat outFmt;
+                outFmt.setSampleRate(static_cast<int>(wavSr));
+                outFmt.setChannelCount(static_cast<int>(wavCh));
+                outFmt.setSampleFormat(QAudioFormat::Int16);
+
+                if (!outDev.isFormatSupported(outFmt)) {
+                    outFmt = outDev.preferredFormat();
+                }
+
+                // WAV Int16 verisini çıkış cihazının formatına (örnekleme hızı / kanal / Int16-Int32-Float) dönüştür
+                const int inFrames = dataLen / (wavCh * 2);
+                std::vector<float> mono(inFrames, 0.0f);
+                const uchar* srcPtr = reinterpret_cast<const uchar*>(wavBytes.constData() + dataOff);
+                for (int f = 0; f < inFrames; ++f) {
+                    float s = 0.0f;
+                    for (int c = 0; c < wavCh; ++c) {
+                        qint16 v = qFromLittleEndian<qint16>(srcPtr + (f * wavCh + c) * 2);
+                        s += static_cast<float>(v) / 32768.0f;
+                    }
+                    mono[f] = s / static_cast<float>(wavCh);
+                }
+
+                const int outSr = qMax(8000, outFmt.sampleRate());
+                const int outCh = qMax(1, outFmt.channelCount());
+                const double ratio = static_cast<double>(wavSr) / static_cast<double>(outSr);
+                const int outFrames = qMax(1, static_cast<int>(std::floor(inFrames / ratio)));
+
+                int outBps = 2;
+                if (outFmt.sampleFormat() == QAudioFormat::Float || outFmt.sampleFormat() == QAudioFormat::Int32) outBps = 4;
+                else if (outFmt.sampleFormat() == QAudioFormat::UInt8) outBps = 1;
+
+                QByteArray outPcm(outFrames * outCh * outBps, Qt::Uninitialized);
+                uchar* dstPtr = reinterpret_cast<uchar*>(outPcm.data());
+                for (int i = 0; i < outFrames; ++i) {
+                    const double srcPos = i * ratio;
+                    const int i0 = qMin(static_cast<int>(srcPos), inFrames - 1);
+                    const int i1 = qMin(i0 + 1, inFrames - 1);
+                    const float frac = static_cast<float>(srcPos - i0);
+                    const float val = qBound(-1.0f, mono[i0] * (1.0f - frac) + mono[i1] * frac, 1.0f);
+
+                    for (int c = 0; c < outCh; ++c) {
+                        uchar* cell = dstPtr + (i * outCh + c) * outBps;
+                        if (outFmt.sampleFormat() == QAudioFormat::Int16) {
+                            qToLittleEndian<qint16>(static_cast<qint16>(std::lrint(val * 32767.0f)), cell);
+                        } else if (outFmt.sampleFormat() == QAudioFormat::Int32) {
+                            qToLittleEndian<qint32>(static_cast<qint32>(std::llround(static_cast<double>(val) * 2147483647.0)), cell);
+                        } else if (outFmt.sampleFormat() == QAudioFormat::Float) {
+                            qToLittleEndian<float>(val, cell);
+                        } else if (outFmt.sampleFormat() == QAudioFormat::UInt8) {
+                            *cell = static_cast<uchar>(qBound(0, static_cast<int>(std::lrint((val + 1.0f) * 127.5f)), 255));
+                        }
+                    }
+                }
+
+                m_previewBuf = new QBuffer(this);
+                m_previewBuf->setData(outPcm);
+                m_previewBuf->open(QIODevice::ReadOnly);
+
+                m_previewSink = new QAudioSink(outDev, outFmt, this);
+                m_previewSink->setVolume(1.0f);
+                connect(m_previewSink, &QAudioSink::stateChanged, this, [this](QAudio::State st) {
+                    if ((st == QAudio::IdleState || st == QAudio::StoppedState) && m_state == State::Playing) {
+                        m_recordTimer->stop();
+                        setState(State::Recorded);
+                    }
+                });
+
+                setState(State::Playing);
+                m_recordTimer->start();
+                m_previewSink->start(m_previewBuf);
+                return;
+            }
+        }
+    }
+
     initPlayer();
     m_player->setSource(QUrl::fromLocalFile(m_wavPath));
     m_player->play();
@@ -424,11 +575,31 @@ void AnnounceRecordDialog::onDinleClicked() {
 
 void AnnounceRecordDialog::onDinleDurdurClicked() {
     m_recordTimer->stop();
+    if (m_previewSink) {
+        m_previewSink->stop();
+        delete m_previewSink;
+        m_previewSink = nullptr;
+    }
+    if (m_previewBuf) {
+        m_previewBuf->close();
+        delete m_previewBuf;
+        m_previewBuf = nullptr;
+    }
     if (m_player) m_player->stop();
     setState(State::Recorded);
 }
 
 void AnnounceRecordDialog::onTekrarKaydetClicked() {
+    if (m_previewSink) {
+        m_previewSink->stop();
+        delete m_previewSink;
+        m_previewSink = nullptr;
+    }
+    if (m_previewBuf) {
+        m_previewBuf->close();
+        delete m_previewBuf;
+        m_previewBuf = nullptr;
+    }
     if (m_player) m_player->stop();
     m_recordTimer->stop();
     cleanupTempFile();

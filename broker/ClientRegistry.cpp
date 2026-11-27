@@ -8,7 +8,16 @@ ClientRegistry::ClientRegistry(QObject* parent)
 
 void ClientRegistry::registerClient(const QString& clientId,
                                      const RegisteredClient& client) {
+    if (m_clients.contains(clientId)) {
+        Connection* oldConn = m_clients[clientId].connection;
+        if (oldConn && oldConn != client.connection) {
+            m_connToClientId.remove(oldConn);
+        }
+    }
     m_clients[clientId] = client;
+    if (client.connection) {
+        m_connToClientId[client.connection] = clientId;
+    }
     Logger::info(QObject::tr("ClientRegistry: Kayıt → ") + clientId +
                  " (" + client.hostname + ")");
     emit clientRegistered(clientId);
@@ -33,30 +42,37 @@ void ClientRegistry::registerClient(const QString& clientId,
 }
 
 void ClientRegistry::unregisterByConnection(Connection* conn) {
-    for (auto it = m_clients.begin(); it != m_clients.end(); ++it) {
-        if (it->connection == conn) {
-            QString clientId = it.key();
-            m_clients.erase(it);
-            // m_screenSubscribers ve m_metricsSubscribers kayıtlarını silmiyoruz;
-            // Master halen bağlı ve bu istemciyi izlemek istiyor olabilir.
-            // İstemci yeniden bağlandığında hasScreenSubscribers() ile akış anında yeniden başlar.
-            // Master koptuğunda ise removeMasterConnection() zaten temizliği yapar.
-            Logger::info(QObject::tr("ClientRegistry: Silindi → ") + clientId);
-            emit clientUnregistered(clientId);
-            releaseAgentLock(clientId);
-
-            // Master'a bildir
-            okidia::Envelope env;
-            env.set_type(okidia::MessageType::CLIENT_INFO);
-            env.set_sequence_id(0);
-            // clientId'yi payload olarak gönder
-            okidia::ClientInfo info;
-            info.set_machine_id(clientId.toStdString());
-            info.set_hostname("__disconnected__");
-            env.set_payload(info.SerializeAsString());
-            forwardToMaster(clientId, env);
-            return;
+    QString clientId = m_connToClientId.take(conn);
+    auto it = clientId.isEmpty() ? m_clients.end() : m_clients.find(clientId);
+    if (it == m_clients.end() || it->connection != conn) {
+        // Fallback: ters haritada yoksa tara
+        for (it = m_clients.begin(); it != m_clients.end(); ++it) {
+            if (it->connection == conn) {
+                clientId = it.key();
+                break;
+            }
         }
+    }
+    if (it != m_clients.end()) {
+        m_clients.erase(it);
+        // m_screenSubscribers ve m_metricsSubscribers kayıtlarını silmiyoruz;
+        // Master halen bağlı ve bu istemciyi izlemek istiyor olabilir.
+        // İstemci yeniden bağlandığında hasScreenSubscribers() ile akış anında yeniden başlar.
+        // Master koptuğunda ise removeMasterConnection() zaten temizliği yapar.
+        Logger::info(QObject::tr("ClientRegistry: Silindi → ") + clientId);
+        emit clientUnregistered(clientId);
+        releaseAgentLock(clientId);
+
+        // Master'a bildir
+        okidia::Envelope env;
+        env.set_type(okidia::MessageType::CLIENT_INFO);
+        env.set_sequence_id(0);
+        // clientId'yi payload olarak gönder
+        okidia::ClientInfo info;
+        info.set_machine_id(clientId.toStdString());
+        info.set_hostname("__disconnected__");
+        env.set_payload(info.SerializeAsString());
+        forwardToMaster(clientId, env);
     }
 }
 
@@ -102,6 +118,7 @@ void ClientRegistry::onHeartbeatWatchdog() {
     for (const QString& clientId : timedOut) {
         if (!m_clients.contains(clientId)) continue;
         Connection* conn = m_clients[clientId].connection;
+        if (conn) m_connToClientId.remove(conn);
         m_clients.remove(clientId);
         emit clientUnregistered(clientId);
         releaseAgentLock(clientId);
@@ -368,6 +385,7 @@ void ClientRegistry::revokeClient(const QString& machineId, bool uninstall)
             auto& client = m_clients[foundId];
             Connection* conn = client.connection;
             if (conn) {
+                m_connToClientId.remove(conn);
                 okidia::Envelope env;
                 env.set_type(okidia::MessageType::CLIENT_UNINSTALL);
                 okidia::ClientRevokeCommand cmd;
@@ -400,6 +418,7 @@ void ClientRegistry::revokeClient(const QString& machineId, bool uninstall)
             auto& client = m_clients[foundId];
             Connection* conn = client.connection;
             if (conn) {
+                m_connToClientId.remove(conn);
                 okidia::Envelope env;
                 env.set_type(okidia::MessageType::CLIENT_REVOKE);
                 okidia::ClientRevokeCommand cmd;
@@ -453,15 +472,16 @@ void ClientRegistry::revokeAll(bool uninstall)
         OkidiaDatabase::instance().removeFromBlacklist(mid);
     }
     m_clients.clear();
+    m_connToClientId.clear();
     emit clientUnregistered("__all__");
 }
 
 bool ClientRegistry::isRevoked(const QString& machineId) const
 {
     if (machineId.isEmpty()) return false;
-    // Önce hafıza cache, sonra DB
-    if (m_revoked.contains(machineId)) return true;
-    return OkidiaDatabase::instance().isBlacklisted(machineId);
+    // m_revoked açılışta DB'den yüklenir ve revokeClient/unrevokeClient/revokeAll ile
+    // senkron tutulur; her pakette senkron SQLite sorgusuna düşmeden O(1) bellek denetimi yap.
+    return m_revoked.contains(machineId);
 }
 
 void ClientRegistry::loadFromDb()

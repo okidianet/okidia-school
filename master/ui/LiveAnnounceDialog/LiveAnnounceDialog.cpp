@@ -13,6 +13,7 @@
 #include <QMediaDevices>
 #include <QAudioDevice>
 #include <QGroupBox>
+#include <QProgressBar>
 
 LiveAnnounceDialog::LiveAnnounceDialog(SessionManager* session,
                                        const QStringList& targets,
@@ -64,7 +65,23 @@ LiveAnnounceDialog::LiveAnnounceDialog(SessionManager* session,
     m_statusLabel->setWordWrap(true);
     statusBox->addWidget(m_statusLabel);
 
+    m_levelBar = new QProgressBar(this);
+    m_levelBar->setRange(0, 100);
+    m_levelBar->setValue(0);
+    m_levelBar->setTextVisible(false);
+    m_levelBar->setFixedHeight(10);
+    m_levelBar->setToolTip(tr("Canlı mikrofon ses seviyesi"));
+    statusBox->addWidget(m_levelBar);
+
     rootLayout->addLayout(statusBox);
+
+    if (m_session) {
+        connect(m_session, &SessionManager::audioInputLevelChanged, this, [this](int pct) {
+            if (m_levelBar) {
+                m_levelBar->setValue(qBound(0, pct, 100));
+            }
+        });
+    }
 
     // Butonlar
     m_btnBroadcast = new QPushButton(tr("Canlı Yayını Başlat"), this);
@@ -164,6 +181,7 @@ void LiveAnnounceDialog::setLiveState(bool isLive) {
         m_elapsedTimer->start();
     } else {
         m_elapsedTimer->stop();
+        if (m_levelBar) m_levelBar->setValue(0);
         m_btnBroadcast->setText(tr("Canlı Yayını Başlat"));
         m_btnBroadcast->setIcon(ThemeManager::icon(":/ui/record.svg"));
         m_btnBroadcast->setStyleSheet("font-size: 14px; font-weight: bold;");

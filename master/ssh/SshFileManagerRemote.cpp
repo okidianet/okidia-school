@@ -22,7 +22,7 @@
 // ----------------------------------------------------------------------------
 
 void SshFileManagerWidget::onRemoteUpClicked() {
-    QString current = QDir::fromNativeSeparators(m_remoteCurrentPath).trimmed();
+    QString current = OkidiaUtils::fromRemotePathSeparators(m_remoteCurrentPath);
     if (current.isEmpty()) return;
 
     if (m_isRemoteWindows) {
@@ -67,7 +67,7 @@ void SshFileManagerWidget::onRemoteRefreshClicked() {
 void SshFileManagerWidget::loadRemoteDirectory(const QString& path) {
     if (!isConnected() || m_loadingRemote) return;
 
-    QString cleanPath = QDir::fromNativeSeparators(path.trimmed());
+    QString cleanPath = OkidiaUtils::fromRemotePathSeparators(path);
     if (m_isRemoteWindows) {
         if (cleanPath == tr("Bilgisayarım") || cleanPath == "Bilgisayarım" || cleanPath == "/") {
             cleanPath = tr("Bilgisayarım");
@@ -106,7 +106,7 @@ void SshFileManagerWidget::loadRemoteDirectory(const QString& path) {
             if (drivesOut.contains("Drives:", Qt::CaseInsensitive)) {
                 drivesOut.remove("Drives:", Qt::CaseInsensitive);
                 for (const QString& d : drivesOut.split(QRegularExpression("\\s+"), Qt::SkipEmptyParts)) {
-                    QString dClean = QDir::fromNativeSeparators(d.trimmed());
+                    QString dClean = OkidiaUtils::fromRemotePathSeparators(d);
                     if (!dClean.endsWith("/")) dClean += "/";
                     if (!driveList.contains(dClean, Qt::CaseInsensitive)) driveList.append(dClean);
                 }
@@ -114,7 +114,7 @@ void SshFileManagerWidget::loadRemoteDirectory(const QString& path) {
             if (driveList.isEmpty()) {
                 QString psOut = m_client->executeSync("powershell -NoProfile -Command \"(Get-PSDrive -PSProvider FileSystem).Root\"", 4000).trimmed();
                 for (const QString& d : psOut.split(QRegularExpression("[\\r\\n]+"), Qt::SkipEmptyParts)) {
-                    QString dClean = QDir::fromNativeSeparators(d.trimmed());
+                    QString dClean = OkidiaUtils::fromRemotePathSeparators(d);
                     if (!dClean.endsWith("/")) dClean += "/";
                     if (!driveList.contains(dClean, Qt::CaseInsensitive)) driveList.append(dClean);
                 }
@@ -323,14 +323,14 @@ void SshFileManagerWidget::onRemoteTableDoubleClicked(int row, int column) {
         if (m_isRemoteWindows && (m_remoteCurrentPath == tr("Bilgisayarım") || m_remoteCurrentPath == "Bilgisayarım")) {
             loadRemoteDirectory(dirName);
         } else {
-            QString nextPath = QDir::fromNativeSeparators(m_remoteCurrentPath);
+            QString nextPath = OkidiaUtils::fromRemotePathSeparators(m_remoteCurrentPath);
             if (!nextPath.endsWith("/")) nextPath += "/";
             nextPath += dirName;
             loadRemoteDirectory(nextPath);
         }
     } else {
         QString fileName = item->text();
-        QString remotePath = m_remoteCurrentPath;
+        QString remotePath = OkidiaUtils::fromRemotePathSeparators(m_remoteCurrentPath);
         if (!remotePath.endsWith("/")) remotePath += "/";
         remotePath += fileName;
         downloadAndOpenRemoteFile(remotePath, fileName, false);
@@ -345,14 +345,14 @@ void SshFileManagerWidget::onRemoteItemDoubleClicked(QListWidgetItem* item) {
         if (m_isRemoteWindows && (m_remoteCurrentPath == tr("Bilgisayarım") || m_remoteCurrentPath == "Bilgisayarım")) {
             loadRemoteDirectory(dirName);
         } else {
-            QString nextPath = QDir::fromNativeSeparators(m_remoteCurrentPath);
+            QString nextPath = OkidiaUtils::fromRemotePathSeparators(m_remoteCurrentPath);
             if (!nextPath.endsWith("/")) nextPath += "/";
             nextPath += dirName;
             loadRemoteDirectory(nextPath);
         }
     } else {
         QString fileName = item->text();
-        QString remotePath = m_remoteCurrentPath;
+        QString remotePath = OkidiaUtils::fromRemotePathSeparators(m_remoteCurrentPath);
         if (!remotePath.endsWith("/")) remotePath += "/";
         remotePath += fileName;
         downloadAndOpenRemoteFile(remotePath, fileName, false);
@@ -426,13 +426,33 @@ void SshFileManagerWidget::onRemoteCreateFolderAction() {
     QString folderName = QInputDialog::getText(this, tr("Yeni Klasör"), tr("Klasör Adı:"), QLineEdit::Normal, QString(), &ok);
     if (!ok || folderName.trimmed().isEmpty()) return;
 
-    QString newDirPath = m_remoteCurrentPath;
-    if (newDirPath.endsWith("/")) newDirPath += folderName.trimmed();
-    else newDirPath += "/" + folderName.trimmed();
+    QString baseDir = OkidiaUtils::fromRemotePathSeparators(m_remoteCurrentPath);
+    QString newDirPath = baseDir.endsWith("/") ? (baseDir + folderName.trimmed()) : (baseDir + "/" + folderName.trimmed());
 
-    QString cmd = OkidiaUtils::remoteMkdirCmd(newDirPath, m_isRemoteWindows);
-    QString sudoTpl = m_isRemoteWindows ? "" : QString("echo '%%1' | sudo -S %1").arg(cmd);
-    runRemoteCommandWithSudo(cmd, sudoTpl, tr("Yeni Klasör"));
+    m_progressBar->setVisible(true);
+    m_progressLbl->setText(tr("Yeni Klasör yapılıyor..."));
+    m_progressBar->setValue(0);
+    setUiEnabled(false);
+
+    std::ignore = QtConcurrent::run([this, newDirPath]() {
+        // 1. Önce doğrudan SFTP mkdir dene
+        if (m_client->createDirectory(newDirPath)) {
+            QMetaObject::invokeMethod(this, [this]() {
+                m_progressBar->setVisible(false);
+                m_progressLbl->clear();
+                setUiEnabled(true);
+                loadRemoteDirectory(m_remoteCurrentPath);
+            }, Qt::QueuedConnection);
+            return;
+        }
+
+        // 2. SFTP başarısız olursa kabuk komutuna (ve Linux'ta sudo'ya) düş
+        QMetaObject::invokeMethod(this, [this, newDirPath]() {
+            QString cmd = OkidiaUtils::remoteMkdirCmd(newDirPath, m_isRemoteWindows);
+            QString sudoTpl = m_isRemoteWindows ? "" : QString("echo '%%1' | sudo -S %1").arg(cmd);
+            runRemoteCommandWithSudo(cmd, sudoTpl, tr("Yeni Klasör"));
+        }, Qt::QueuedConnection);
+    });
 }
 
 void SshFileManagerWidget::onRemoteRenameAction() {
@@ -451,17 +471,43 @@ void SshFileManagerWidget::onRemoteRenameAction() {
     QString newName = QInputDialog::getText(this, tr("Yeniden Adlandır"), tr("Yeni İsim:"), QLineEdit::Normal, oldName, &ok);
     if (!ok || newName.trimmed().isEmpty() || newName.trimmed() == oldName) return;
 
-    QString oldPath = m_remoteCurrentPath.endsWith("/") ? m_remoteCurrentPath + oldName : m_remoteCurrentPath + "/" + oldName;
-    QString newPath = m_remoteCurrentPath.endsWith("/") ? m_remoteCurrentPath + newName.trimmed() : m_remoteCurrentPath + "/" + newName.trimmed();
+    QString baseDir = OkidiaUtils::fromRemotePathSeparators(m_remoteCurrentPath);
+    QString oldPath = baseDir.endsWith("/") ? (baseDir + oldName) : (baseDir + "/" + oldName);
+    QString newPath = baseDir.endsWith("/") ? (baseDir + newName.trimmed()) : (baseDir + "/" + newName.trimmed());
 
-    QString cmd = OkidiaUtils::remoteMoveCmd(oldPath, newPath, m_isRemoteWindows);
-    QString sudoTpl = m_isRemoteWindows ? "" : QString("echo '%%1' | sudo -S %1").arg(cmd);
-    runRemoteCommandWithSudo(cmd, sudoTpl, tr("Yeniden Adlandır"));
+    m_progressBar->setVisible(true);
+    m_progressLbl->setText(tr("Yeniden Adlandır yapılıyor..."));
+    m_progressBar->setValue(0);
+    setUiEnabled(false);
+
+    std::ignore = QtConcurrent::run([this, oldPath, newPath]() {
+        // 1. Önce doğrudan SFTP rename dene
+        if (m_client->renameRemoteFile(oldPath, newPath)) {
+            QMetaObject::invokeMethod(this, [this]() {
+                m_progressBar->setVisible(false);
+                m_progressLbl->clear();
+                setUiEnabled(true);
+                loadRemoteDirectory(m_remoteCurrentPath);
+            }, Qt::QueuedConnection);
+            return;
+        }
+
+        // 2. SFTP başarısız olursa kabuk komutuna düş
+        QMetaObject::invokeMethod(this, [this, oldPath, newPath]() {
+            QString cmd = OkidiaUtils::remoteMoveCmd(oldPath, newPath, m_isRemoteWindows);
+            QString sudoTpl = m_isRemoteWindows ? "" : QString("echo '%%1' | sudo -S %1").arg(cmd);
+            runRemoteCommandWithSudo(cmd, sudoTpl, tr("Yeniden Adlandır"));
+        }, Qt::QueuedConnection);
+    });
 }
 
 void SshFileManagerWidget::onRemoteDeleteAction() {
-    QStringList cmds;
-    int count = 0;
+    struct DeleteItem {
+        QString path;
+        bool isDir;
+    };
+    QList<DeleteItem> itemsToDelete;
+    QString baseDir = OkidiaUtils::fromRemotePathSeparators(m_remoteCurrentPath);
 
     if (m_viewMode == Details) {
         QList<QTableWidgetItem*> selectedItems = m_remoteFileTable->selectedItems();
@@ -471,34 +517,63 @@ void SshFileManagerWidget::onRemoteDeleteAction() {
                 rows.append(item->row());
             }
         }
-        count = rows.size();
         for (int r : rows) {
             QString name = m_remoteFileTable->item(r, 0)->text();
             bool isDir = m_remoteFileTable->item(r, 0)->data(Qt::UserRole + 2).toBool();
-            QString path = m_remoteCurrentPath.endsWith("/") ? m_remoteCurrentPath + name : m_remoteCurrentPath + "/" + name;
-            cmds.append(OkidiaUtils::remoteDeleteCmd(path, isDir, m_isRemoteWindows));
+            QString path = baseDir.endsWith("/") ? (baseDir + name) : (baseDir + "/" + name);
+            itemsToDelete.append({path, isDir});
         }
     } else {
         auto selectedItems = m_remoteIconList->selectedItems();
-        count = selectedItems.size();
         for (auto* item : selectedItems) {
             QString name = item->text();
             bool isDir = item->data(Qt::UserRole + 2).toBool();
-            QString path = m_remoteCurrentPath.endsWith("/") ? m_remoteCurrentPath + name : m_remoteCurrentPath + "/" + name;
-            cmds.append(OkidiaUtils::remoteDeleteCmd(path, isDir, m_isRemoteWindows));
+            QString path = baseDir.endsWith("/") ? (baseDir + name) : (baseDir + "/" + name);
+            itemsToDelete.append({path, isDir});
         }
     }
 
-    if (count == 0) return;
+    if (itemsToDelete.isEmpty()) return;
 
-    auto res = QMessageBox::question(this, tr("Sil"), QString(tr("%1 adet öğeyi silmek istediğinizden emin misiniz?")).arg(count),
+    auto res = QMessageBox::question(this, tr("Sil"), QString(tr("%1 adet öğeyi silmek istediğinizden emin misiniz?")).arg(itemsToDelete.size()),
                                      QMessageBox::Yes | QMessageBox::No);
     if (res != QMessageBox::Yes) return;
 
-    QString sep = m_isRemoteWindows ? " & " : " && ";
-    QString fullCmd = cmds.join(sep);
-    QString sudoTpl = m_isRemoteWindows ? "" : QString("echo '%%1' | sudo -S sh -c '%2'").arg(fullCmd.replace("'", "'\''"));
-    runRemoteCommandWithSudo(fullCmd, sudoTpl, tr("Sil"));
+    m_progressBar->setVisible(true);
+    m_progressLbl->setText(tr("Sil yapılıyor..."));
+    m_progressBar->setValue(0);
+    setUiEnabled(false);
+
+    std::ignore = QtConcurrent::run([this, itemsToDelete]() {
+        QStringList fallbackCmds;
+        for (const auto& item : itemsToDelete) {
+            bool sftpDeleted = item.isDir
+                ? m_client->removeRemoteDirectory(item.path)
+                : m_client->removeRemoteFile(item.path);
+            if (!sftpDeleted) {
+                fallbackCmds.append(OkidiaUtils::remoteDeleteCmd(item.path, item.isDir, m_isRemoteWindows));
+            }
+        }
+
+        if (fallbackCmds.isEmpty()) {
+            QMetaObject::invokeMethod(this, [this]() {
+                m_progressBar->setVisible(false);
+                m_progressLbl->clear();
+                setUiEnabled(true);
+                loadRemoteDirectory(m_remoteCurrentPath);
+            }, Qt::QueuedConnection);
+            return;
+        }
+
+        QMetaObject::invokeMethod(this, [this, fallbackCmds]() {
+            QString sep = m_isRemoteWindows ? " & " : " && ";
+            QString fullCmd = fallbackCmds.join(sep);
+            QString escapedForSudo = fullCmd;
+            escapedForSudo.replace("'", "'\\''");
+            QString sudoTpl = m_isRemoteWindows ? "" : QString("echo '%%1' | sudo -S sh -c '%2'").arg(escapedForSudo);
+            runRemoteCommandWithSudo(fullCmd, sudoTpl, tr("Sil"));
+        }, Qt::QueuedConnection);
+    });
 }
 
 void SshFileManagerWidget::runRemoteCommandWithSudo(const QString& normalCmd, const QString& sudoCmdTpl, const QString& opName) {
@@ -517,6 +592,16 @@ void SshFileManagerWidget::runRemoteCommandWithSudo(const QString& normalCmd, co
                 m_progressLbl->clear();
                 setUiEnabled(true);
                 loadRemoteDirectory(m_remoteCurrentPath);
+            }, Qt::QueuedConnection);
+            return;
+        }
+
+        if (sudoCmdTpl.isEmpty()) {
+            QMetaObject::invokeMethod(this, [this, opName, out]() {
+                m_progressBar->setVisible(false);
+                m_progressLbl->clear();
+                setUiEnabled(true);
+                QMessageBox::critical(this, tr("Hata"), opName + tr(" işlemi başarısız: ") + out.trimmed());
             }, Qt::QueuedConnection);
             return;
         }

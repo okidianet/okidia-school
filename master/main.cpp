@@ -297,18 +297,23 @@ int main(int argc, char* argv[]) {
     while (true) {
         UserRecord activeUser;
         bool isRememberMe = true;
+        bool isOfflineSsh = false;
 
-        LoginDialog loginDlg;
-        loginDlg.setSessionManager(session);
-        if (loginDlg.exec() != QDialog::Accepted) {
-            Logger::info(QObject::tr("Login iptal edildi, çıkılıyor."));
-            delete session;
-            QFile::remove(pidFilePath);
-            return 0;
+        {
+            // LoginDialog kendi kapsamında yaşamalı; MainWindow açıkken arka planda
+            // loginResult sinyallerini dinleyip m_isOfflineMode/kimlik durumunu bozmasın.
+            LoginDialog loginDlg;
+            loginDlg.setSessionManager(session);
+            if (loginDlg.exec() != QDialog::Accepted) {
+                Logger::info(QObject::tr("Login iptal edildi, çıkılıyor."));
+                delete session;
+                QFile::remove(pidFilePath);
+                return 0;
+            }
+            activeUser = loginDlg.loggedInUser();
+            isRememberMe = loginDlg.rememberMe();
+            isOfflineSsh = loginDlg.isOfflineSshMode();
         }
-        activeUser = loginDlg.loggedInUser();
-        isRememberMe = loginDlg.rememberMe();
-        const bool isOfflineSsh = loginDlg.isOfflineSshMode();
         if (isOfflineSsh) {
             session->setOfflineMode(true);
             Logger::info(QObject::tr("Master: Bağımsız Çevrimdışı SSH Modu ile başlatıldı."));

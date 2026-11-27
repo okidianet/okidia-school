@@ -24,11 +24,21 @@ ChatHandler::~ChatHandler() {
 
 void ChatHandler::setMyInfo(const QString& clientId,
                               const QString& hostname,
-                              const QString& username) {
+                              const QString& username,
+                              const QString& displayName) {
     m_myClientId = clientId;
     m_myHostname = hostname;
     m_myUsername = username;
-    m_myDisplay  = hostname + (username.isEmpty() ? "" : " · " + username);
+
+    const QString namePart = !displayName.trimmed().isEmpty() ? displayName.trimmed() : username.trimmed();
+    const QString hostPart = hostname.trimmed();
+    if (!namePart.isEmpty() && !hostPart.isEmpty()) {
+        m_myDisplay = QString("%1 - %2").arg(namePart, hostPart);
+    } else if (!namePart.isEmpty()) {
+        m_myDisplay = namePart;
+    } else {
+        m_myDisplay = hostPart;
+    }
 }
 
 void ChatHandler::updateChatAvailability() {
@@ -78,12 +88,15 @@ void ChatHandler::showChatWindow(bool allowEmpty) {
                 m_window->addMember(cached.info.id, member);
         }
 
-        // Önbellekteki kilit durumlarını uygula
+        // Önbellekteki kilit ve susturma durumlarını uygula
         for (auto it = m_classLockStates.constBegin(); it != m_classLockStates.constEnd(); ++it) {
             for (auto rIt = m_cachedRooms.constBegin(); rIt != m_cachedRooms.constEnd(); ++rIt) {
                 m_window->setChatLocked(rIt.key(), it.value().first);
             }
             m_window->setPrivateLocked(it.value().second);
+        }
+        if (m_mutedUntil > OkidiaUtils::nowSecs()) {
+            m_window->setSpamMuted(m_mutedUntil, m_muteReason);
         }
     }
     m_window->show();
@@ -121,6 +134,8 @@ void ChatHandler::handleEnvelope(const okidia::Envelope& env) {
         handlePrivateClose(env); break;
     case okidia::MessageType::CHAT_LOCK_STATE:
         handleChatLockState(env); break;
+    case okidia::MessageType::CHAT_MUTE_STATE:
+        handleChatMuteState(env); break;
     case okidia::MessageType::CHAT_WINDOW_STATE:
         handleChatWindowState(env); break;
     default: break;
@@ -398,6 +413,10 @@ void ChatHandler::handlePrivateClose(const okidia::Envelope& env) {
 
 void ChatHandler::onMessageSent(const QString& roomId, const QString& content) {
     if (!m_conn) return;
+    if (m_mutedUntil > OkidiaUtils::nowSecs()) {
+        if (m_window) m_window->setSpamMuted(m_mutedUntil, m_muteReason);
+        return;
+    }
     okidia::ChatMessage proto;
     proto.set_room_id(roomId.toStdString());
     proto.set_from(m_myDisplay.toStdString());
@@ -549,6 +568,12 @@ void ChatHandler::onHandRaiseRequested(const QString& note) {
         Logger::info(QObject::tr("ChatHandler: El kaldırma gönderilemedi — servis bağlantısı yok"));
         return;
     }
+    const qint64 now = OkidiaUtils::nowSecs();
+    if (m_lastHandRaiseAt > 0 && (now - m_lastHandRaiseAt) < 30) {
+        Logger::info(QObject::tr("ChatHandler: Yardım talebi bekleme süresi dolmadı."));
+        return;
+    }
+    m_lastHandRaiseAt = now;
     okidia::HandRaiseEvent evt;
     evt.set_message(note.toStdString());
     evt.set_timestamp(OkidiaUtils::nowSecsU64());
@@ -611,6 +636,37 @@ void ChatHandler::handleChatLockState(const okidia::Envelope& env) {
     }
 
     updateChatAvailability();
+}
+
+void ChatHandler::handleChatMuteState(const okidia::Envelope& env) {
+    okidia::ChatMuteState msg;
+    if (!msg.ParseFromString(env.payload())) return;
+
+    const bool muted = msg.muted();
+    const qint64 mutedUntil = static_cast<qint64>(msg.muted_until());
+    const QString reason = QString::fromStdString(msg.reason());
+
+    if (muted && mutedUntil > OkidiaUtils::nowSecs()) {
+        m_mutedUntil = mutedUntil;
+        m_muteReason = reason;
+    } else {
+        m_mutedUntil = 0;
+        m_muteReason.clear();
+    }
+
+    if (m_window) {
+        m_window->setSpamMuted(m_mutedUntil, m_muteReason);
+        if (m_mutedUntil > OkidiaUtils::nowSecs() && !m_muteReason.isEmpty()) {
+            // Aktif oda sekmesine bilgilendirme sistem mesajı ekle
+            for (auto it = m_cachedRooms.constBegin(); it != m_cachedRooms.constEnd(); ++it) {
+                AgentMessage sys;
+                sys.isSystem = true;
+                sys.content = m_muteReason;
+                sys.timestamp = OkidiaUtils::nowSecs();
+                m_window->appendMessage(it.key(), sys);
+            }
+        }
+    }
 }
 
 void ChatHandler::handleChatWindowState(const okidia::Envelope& env) {

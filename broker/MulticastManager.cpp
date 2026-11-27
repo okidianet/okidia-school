@@ -52,6 +52,7 @@ void MulticastManager::processUploadBegin(uint64_t seqId, const QString& targets
     QString listStr = targetsCsv;
     bool isAnnounce = false;
     int repeatCount = 1;
+    QString announceId;
 
     if (listStr.startsWith("__multicast_anons__:")) {
         isAnnounce = true;
@@ -66,8 +67,13 @@ void MulticastManager::processUploadBegin(uint64_t seqId, const QString& targets
                 if (param.startsWith("repeat=")) {
                     repeatCount = param.mid(7).toInt();
                     if (repeatCount < 1) repeatCount = 1;
+                } else if (param.startsWith("id=")) {
+                    announceId = param.mid(3).trimmed();
                 }
             }
+        }
+        if (announceId.isEmpty()) {
+            announceId = QString::number(seqId);
         }
     } else if (listStr.startsWith("__multicast__:")) {
         listStr = listStr.mid(14);
@@ -91,6 +97,7 @@ void MulticastManager::processUploadBegin(uint64_t seqId, const QString& targets
     task->readOnly = begin.read_only();
     task->isAnnounce = isAnnounce;
     task->repeatCount = repeatCount;
+    task->announceId = announceId;
     task->tempFilePath = QDir::tempPath() + QString("/okidia_multicast_%1.tmp").arg(seqId);
 
     task->tempFile.setFileName(task->tempFilePath);
@@ -125,6 +132,7 @@ void MulticastManager::processUploadBegin(uint64_t seqId, const QString& targets
         stream->sequenceId = seqId;
         stream->isAnnounce = task->isAnnounce;
         stream->repeatCount = task->repeatCount;
+        stream->announceId = task->announceId;
         stream->state = ClientStream::PENDING;
         task->clients[clientId] = stream;
     }
@@ -342,6 +350,10 @@ void MulticastManager::checkAnnouncePlaybackTrigger(MulticastTask* task) {
             okidia::AudioPlayLocalCommand playCmd;
             playCmd.set_anons_path(("/tmp/" + stream->filename).toStdString());
             playCmd.set_repeat_count(static_cast<int32_t>(stream->repeatCount));
+            playCmd.set_is_bell(false);
+            if (!stream->announceId.isEmpty()) {
+                playCmd.set_announce_id(stream->announceId.toStdString());
+            }
 
             okidia::Envelope playEnv;
             playEnv.set_type(okidia::MessageType::AUDIO_PLAY_LOCAL);
@@ -349,10 +361,36 @@ void MulticastManager::checkAnnouncePlaybackTrigger(MulticastTask* task) {
             playEnv.set_payload(playCmd.SerializeAsString());
             
             m_registry->forwardToClient(stream->clientId, playEnv);
-            Logger::info(QObject::tr("MulticastManager: Senkronize anons çalma komutu gönderildi → %1")
-                         .arg(stream->clientId));
+            Logger::info(QObject::tr("MulticastManager: Senkronize anons çalma komutu gönderildi → %1 (id=%2)")
+                         .arg(stream->clientId, stream->announceId));
         }
     }
+}
+
+QStringList MulticastManager::cancelAnnounceTasks(const QString& announceId) {
+    QStringList affectedClients;
+    QList<uint64_t> toDelete;
+
+    for (auto it = m_tasks.begin(); it != m_tasks.end(); ++it) {
+        MulticastTask* task = it.value();
+        if (!task || !task->isAnnounce) continue;
+        if (!announceId.isEmpty() && task->announceId != announceId) continue;
+
+        for (const QString& cid : task->clients.keys()) {
+            if (!affectedClients.contains(cid)) {
+                affectedClients.append(cid);
+            }
+        }
+        toDelete.append(it.key());
+    }
+
+    for (uint64_t seqId : toDelete) {
+        Logger::info(QObject::tr("MulticastManager: Aktif anons multicast görevi iptal edildi (seqId=%1, id=%2)")
+                     .arg(seqId).arg(announceId.isEmpty() ? QObject::tr("Tümü") : announceId));
+        deleteMulticastTask(seqId);
+    }
+
+    return affectedClients;
 }
 
 void MulticastManager::handleClientReconnect(const QString& clientId) {

@@ -63,17 +63,17 @@ void LicenseManager::parseFromCert(const QString& certPath) {
     }
 
     // Subject CN → okul adı
-    const X509_NAME* subject = X509_get_subject_name(cert);
+    const auto* subject = X509_get_subject_name(cert);
     char cn[256] = {};
 #if defined(__GNUC__) || defined(__clang__)
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wdeprecated-declarations"
 #endif
-    X509_NAME_get_text_by_NID(subject, NID_commonName, cn, sizeof(cn));
+    X509_NAME_get_text_by_NID(const_cast<X509_NAME*>(subject), NID_commonName, cn, sizeof(cn));
     m_info.schoolName = QString::fromUtf8(cn);
 
     // Geçerlilik tarihi
-    ASN1_TIME* notAfter = X509_get_notAfter(cert);
+    const ASN1_TIME* notAfter = X509_get0_notAfter(cert);
     struct tm t = {};
     ASN1_TIME_to_tm(notAfter, &t);
     m_info.expiresAt = QDateTime(
@@ -85,7 +85,7 @@ void LicenseManager::parseFromCert(const QString& certPath) {
     // OID: 1.3.6.1.4.1.99999.1 (örnek — gerçek OID kayıt edilecek)
     // Şimdilik Subject OU alanından okuyoruz
     char ou[256] = {};
-    X509_NAME_get_text_by_NID(subject, NID_organizationalUnitName,
+    X509_NAME_get_text_by_NID(const_cast<X509_NAME*>(subject), NID_organizationalUnitName,
                                ou, sizeof(ou));
 #if defined(__GNUC__) || defined(__clang__)
 #pragma GCC diagnostic pop

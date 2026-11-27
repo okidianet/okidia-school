@@ -229,15 +229,49 @@ void LocalServer::setActiveUser(const QString& username)
 LocalConnection* LocalServer::activeConnection() const
 {
     if (m_clients.isEmpty()) return nullptr;
-    if (m_clients.size() == 1) return m_clients.first();
+
+    auto isHelper = [this](LocalConnection* c) {
+        return m_userMap.value(c).compare(QStringLiteral("input-helper"), Qt::CaseInsensitive) == 0;
+    };
 
     if (!m_activeUser.isEmpty()) {
         for (auto* c : m_clients) {
-            if (m_userMap.value(c).compare(m_activeUser, Qt::CaseInsensitive) == 0)
+            if (!isHelper(c) && m_userMap.value(c).compare(m_activeUser, Qt::CaseInsensitive) == 0)
                 return c;
         }
     }
-    return m_clients.last();
+
+    for (int i = m_clients.size() - 1; i >= 0; --i) {
+        if (!isHelper(m_clients[i])) {
+            return m_clients[i];
+        }
+    }
+    return nullptr;
+}
+
+LocalConnection* LocalServer::exactActiveConnection() const
+{
+    if (m_clients.isEmpty()) return nullptr;
+
+    auto isHelper = [this](LocalConnection* c) {
+        return m_userMap.value(c).compare(QStringLiteral("input-helper"), Qt::CaseInsensitive) == 0;
+    };
+
+    if (!m_activeUser.isEmpty()) {
+        for (auto* c : m_clients) {
+            if (!isHelper(c) && m_userMap.value(c).compare(m_activeUser, Qt::CaseInsensitive) == 0)
+                return c;
+        }
+        return nullptr;
+    }
+
+    LocalConnection* single = nullptr;
+    for (auto* c : m_clients) {
+        if (isHelper(c)) continue;
+        if (single) return nullptr;
+        single = c;
+    }
+    return single;
 }
 
 // ── Yeni bağlantı ─────────────────────────────────────────────────────────

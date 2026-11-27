@@ -98,6 +98,7 @@ ClientThumbnail::~ClientThumbnail() {
 
 void ClientThumbnail::clearFrameBuffer() {
     m_frameBuffer = QPixmap();
+    m_hasValidFrame = false;
     m_remoteWidth = 0;
     m_remoteHeight = 0;
     m_state.initialFrame.clear();
@@ -108,6 +109,7 @@ void ClientThumbnail::clearFrameBuffer() {
 
 void ClientThumbnail::setStreamingMode(bool streaming) {
     m_isStreaming = streaming;
+    m_hasValidFrame = false;
     if (streaming) {
         m_frameBuffer = QPixmap();
     } else {
@@ -137,6 +139,7 @@ void ClientThumbnail::updateFrame(const QByteArray& jpegData) {
         ui->statusIcon->style()->unpolish(ui->statusIcon);
         ui->statusIcon->style()->polish(ui->statusIcon);
         m_frameBuffer = QPixmap();
+        m_hasValidFrame = false;
         
         if (m_state.agentType == 2) {
             ui->screenLabel->clear();
@@ -167,6 +170,7 @@ void ClientThumbnail::updateFrame(const QByteArray& jpegData) {
     if (jpegData.isEmpty()) {
         // Online ama görüntü yok (Siyah ekran + hostname)
         m_frameBuffer = QPixmap();
+        m_hasValidFrame = false;
         ui->screenLabel->setProperty("class", "screenLabelOnline");
         ui->screenLabel->style()->unpolish(ui->screenLabel);
         ui->screenLabel->style()->polish(ui->screenLabel);
@@ -193,6 +197,7 @@ void ClientThumbnail::updateFrame(const QByteArray& jpegData) {
         int bufH = m_remoteHeight > 0 ? m_remoteHeight : 180;
         m_frameBuffer = QPixmap(bufW, bufH);
         m_frameBuffer.fill(Qt::black);
+        m_hasValidFrame = false;
         showPixmap();
         return;
     }
@@ -202,6 +207,7 @@ void ClientThumbnail::updateFrame(const QByteArray& jpegData) {
     ui->screenLabel->style()->unpolish(ui->screenLabel);
     ui->screenLabel->style()->polish(ui->screenLabel);
     m_frameBuffer = pixmap;
+    m_hasValidFrame = true;
     m_remoteWidth  = pixmap.width();
     m_remoteHeight = pixmap.height();
     showPixmap();
@@ -312,6 +318,7 @@ void ClientThumbnail::updateState(const ClientState& state) {
         ui->statusIcon->style()->polish(ui->statusIcon);
         
         m_frameBuffer = QPixmap();
+        m_hasValidFrame = false;
         if (state.agentType == 2) {
             ui->screenLabel->clear();
             ui->screenLabel->setProperty("class", "");
@@ -697,6 +704,7 @@ void ClientThumbnail::updateTile(int x, int y, int w, int h,
     QPainter painter(&m_frameBuffer);
     painter.drawImage(x, y, tileImg);
     painter.end();
+    m_hasValidFrame = true;
 
     // Batch modda render atlanır — batch sonunda refreshDisplay() çağrılır
     if (showNow)

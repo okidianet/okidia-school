@@ -1,0 +1,23 @@
+{
+  "uuid": "okidia-kiosk@okidia.net",
+  "name": "OKIDIA Kiosk & Screen Protection",
+  "description": "OKIDIA okul içi yönetim ajanı için GNOME Wayland sıfır onaylı ekran paylaşımı, üst çubuk gizleme ve kiosk pencere koruması.",
+  "shell-version": [
+    "42",
+    "43",
+    "44",
+    "45",
+    "46",
+    "47",
+    "48",
+    "49",
+    "50"
+  ],
+  "session-modes": [
+    "user",
+    "ubuntu",
+    "unlock-dialog",
+    "gdm"
+  ],
+  "version": 2
+}

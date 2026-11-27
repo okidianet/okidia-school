@@ -625,17 +625,32 @@ bool SystemInfo::isWorkstationLocked()
         return true;
     }
 
-    // 2. Kontrol: Konsol oturumunda LogonUI.exe veya LockApp.exe (Spotlight / Kilit ekranı) süreci
-    // Windows'ta LogonUI.exe ve LockApp.exe kilit/şifre ekranında çalışır.
-    // Salt-okunur süreç anlık görüntüsü DWM masaüstü kilitlemesine yol açmaz.
+    // 2. Kontrol: WTSQuerySessionInformationW (WTSSessionInfoEx) üzerinden çekirdek kilit durumu
+#ifdef WTS_SESSIONSTATE_LOCK
+    LPWSTR pInfoBuf = nullptr;
+    DWORD infoBytes = 0;
+    if (WTSQuerySessionInformationW(WTS_CURRENT_SERVER_HANDLE, sessId, WTSSessionInfoEx, &pInfoBuf, &infoBytes) && pInfoBuf) {
+        if (infoBytes >= sizeof(WTSINFOEXW)) {
+            const WTSINFOEXW* infoEx = reinterpret_cast<const WTSINFOEXW*>(pInfoBuf);
+            if (infoEx->Level == 1 && infoEx->Data.WTSInfoExLevel1.SessionFlags == WTS_SESSIONSTATE_LOCK) {
+                WTSFreeMemory(pInfoBuf);
+                return true;
+            }
+        }
+        WTSFreeMemory(pInfoBuf);
+    }
+#endif
+
+    // 3. Kontrol: Konsol oturumunda LogonUI.exe süreci
+    // Not: LockApp.exe (Spotlight) kilit açıldıktan sonra bile UWP suspended olarak bellekte kalabildiği
+    // için tek başına kilit göstergesi olarak kullanılmaz; LogonUI.exe yalnızca aktif Winlogon/kilit ekranında yaşar.
     HANDLE hSnap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
     if (hSnap != INVALID_HANDLE_VALUE) {
         PROCESSENTRY32W pe = {};
         pe.dwSize = sizeof(pe);
         if (Process32FirstW(hSnap, &pe)) {
             do {
-                if (_wcsicmp(pe.szExeFile, L"LogonUI.exe") == 0 ||
-                    _wcsicmp(pe.szExeFile, L"LockApp.exe") == 0) {
+                if (_wcsicmp(pe.szExeFile, L"LogonUI.exe") == 0) {
                     DWORD procSessId = 0;
                     if (ProcessIdToSessionId(pe.th32ProcessID, &procSessId) && procSessId == sessId) {
                         CloseHandle(hSnap);
@@ -706,6 +721,46 @@ QString SystemInfo::activeDisplayUser()
         }
     }
 
+    // Yöntem 1.5: loginctl list-sessions üzerinden aktif veya greeter (GDM/SDDM/LightDM) oturumunu bul
+    {
+        QProcess pList;
+        pList.start(QStringLiteral("loginctl"), {QStringLiteral("list-sessions"), QStringLiteral("--no-legend")});
+        if (pList.waitForFinished(500) && pList.exitCode() == 0) {
+            QString fallbackGreeter;
+            const QStringList lines = QString::fromLatin1(pList.readAllStandardOutput()).split('\n', Qt::SkipEmptyParts);
+            for (const QString& line : lines) {
+                const QStringList parts = line.split(QRegularExpression(QStringLiteral("\\s+")), Qt::SkipEmptyParts);
+                if (parts.size() >= 3) {
+                    const QString sessId = parts[0];
+                    const QString sessUser = parts[2];
+                    if (sessUser == QLatin1String("root")) continue;
+
+                    QProcess pProps;
+                    pProps.start(QStringLiteral("loginctl"),
+                                 {QStringLiteral("show-session"), sessId,
+                                  QStringLiteral("--property=State"),
+                                  QStringLiteral("--property=Class"),
+                                  QStringLiteral("--property=Type")});
+                    if (pProps.waitForFinished(400) && pProps.exitCode() == 0) {
+                        const QString out = QString::fromLatin1(pProps.readAllStandardOutput());
+                        const bool isActive = out.contains(QStringLiteral("State=active"));
+                        const bool isGreeter = out.contains(QStringLiteral("Class=greeter")) || isDmUser(sessUser);
+                        const bool isGui = out.contains(QStringLiteral("Type=wayland")) || out.contains(QStringLiteral("Type=x11"));
+                        if (isActive && isGui) {
+                            return sessUser;
+                        }
+                        if (isGreeter && fallbackGreeter.isEmpty()) {
+                            fallbackGreeter = sessUser;
+                        }
+                    }
+                }
+            }
+            if (!fallbackGreeter.isEmpty()) {
+                return fallbackGreeter;
+            }
+        }
+    }
+
     // Yöntem 2: who çıktısında :0 ekranını kullanan kullanıcı
     {
         QProcess p;
@@ -717,9 +772,35 @@ QString SystemInfo::activeDisplayUser()
         }
     }
 
-    // Yöntem 3: DM XAUTHORITY dosyası var → login ekranı gösteriliyor
-    if (!dmXauthority().isEmpty())
+    // Yöntem 3: Aktif DM (GDM Wayland/Xorg, gdm-greeter DynamicUser, SDDM, LightDM) çalışma dizinlerinden gerçek DM kullanıcısını tespit et
+    {
+        QDir runUserDir(QStringLiteral("/run/user"));
+        for (const QString& uidStr : runUserDir.entryList(QDir::Dirs | QDir::NoDotAndDotDot)) {
+            const QString rtDirPath = runUserDir.absoluteFilePath(uidStr);
+            QDir rtDir(rtDirPath);
+            const QStringList wl = rtDir.entryList(QStringList() << QStringLiteral("wayland-*"), QDir::System | QDir::Files);
+            if (!wl.isEmpty() || QFile::exists(rtDirPath + QStringLiteral("/gdm/Xauthority"))) {
+                bool okUid = false;
+                uid_t u = static_cast<uid_t>(uidStr.toUInt(&okUid));
+                if (okUid) {
+                    struct passwd* pw = ::getpwuid(u);
+                    if (pw && pw->pw_name) {
+                        const QString uname = QString::fromUtf8(pw->pw_name);
+                        if (isDmUser(uname)) return uname;
+                    } else if (u >= 60000 || u < 1000) {
+                        // systemd DynamicUser (gdm-greeter)
+                        return QStringLiteral("gdm-greeter");
+                    }
+                }
+            }
+        }
+    }
+    if (QDir(QStringLiteral("/run/sddm")).exists() && !QDir(QStringLiteral("/run/sddm")).entryList(QDir::Files | QDir::Hidden).isEmpty()) {
+        return QStringLiteral("sddm");
+    }
+    if (!dmXauthority().isEmpty()) {
         return QStringLiteral("lightdm");
+    }
 
     return {};
 #endif
@@ -833,21 +914,95 @@ QString SystemInfo::dmXauthority()
 #else
     const QString display = activeDmDisplay();
 
+    // 1. LightDM standart yolları
     for (const QString& base : {
-            QString("/run/lightdm/root"),
-            QString("/var/run/lightdm/root") })
+            QStringLiteral("/run/lightdm/root"),
+            QStringLiteral("/var/run/lightdm/root") })
     {
         const QString p = base + display;
         if (QFile::exists(p)) return p;
     }
-    if (QFile::exists("/var/lib/lightdm/.Xauthority"))
+    if (QFile::exists(QStringLiteral("/var/lib/lightdm/.Xauthority")))
         return QStringLiteral("/var/lib/lightdm/.Xauthority");
-    for (const QString& p : {
-            QString("/run/sddm/.Xauthority"),
-            QString("/var/run/sddm/.Xauthority") })
+
+    // 2. SDDM dinamik {UUID} ve standart yolları (/run/sddm/{...} veya /var/run/sddm/{...})
+    for (const QString& sddmDirPath : {
+            QStringLiteral("/run/sddm"),
+            QStringLiteral("/var/run/sddm") })
     {
-        if (QFile::exists(p)) return p;
+        QDir sddmDir(sddmDirPath);
+        if (sddmDir.exists()) {
+            const QFileInfoList files = sddmDir.entryInfoList(QDir::Files | QDir::Hidden | QDir::System, QDir::Time);
+            for (const QFileInfo& fi : files) {
+                if (fi.size() > 0) {
+                    return fi.absoluteFilePath();
+                }
+            }
+        }
     }
+    if (QFile::exists(QStringLiteral("/var/lib/sddm/.Xauthority")))
+        return QStringLiteral("/var/lib/sddm/.Xauthority");
+
+    // 3. GDM / GDM3 (Xorg ve Xwayland yolları)
+    for (const QString& gdmDirPath : {
+            QStringLiteral("/run/gdm3"),
+            QStringLiteral("/var/run/gdm3"),
+            QStringLiteral("/run/gdm"),
+            QStringLiteral("/var/run/gdm") })
+    {
+        QDir gdmDir(gdmDirPath);
+        if (gdmDir.exists()) {
+            const QStringList authDirs = gdmDir.entryList(QStringList() << QStringLiteral("auth-for-*"), QDir::Dirs | QDir::NoDotAndDotDot);
+            for (const QString& ad : authDirs) {
+                const QString dbPath = gdmDir.absoluteFilePath(ad + QStringLiteral("/database"));
+                if (QFile::exists(dbPath)) return dbPath;
+            }
+        }
+    }
+
+    for (const char* dmName : {"gdm", "Debian-gdm", "gdm3", "sddm", "lightdm"}) {
+        struct passwd* pw = ::getpwnam(dmName);
+        if (!pw) continue;
+        const QString rtDirPath = QStringLiteral("/run/user/%1").arg(pw->pw_uid);
+        if (QFile::exists(rtDirPath + QStringLiteral("/gdm/Xauthority"))) {
+            return rtDirPath + QStringLiteral("/gdm/Xauthority");
+        }
+        QDir rtDir(rtDirPath);
+        if (rtDir.exists()) {
+            const QStringList xfiles = rtDir.entryList(
+                QStringList() << QStringLiteral(".mutter-Xwaylandauth*") << QStringLiteral("*Xauthority*") << QStringLiteral("xauth_*"),
+                QDir::Files | QDir::Hidden | QDir::System);
+            if (!xfiles.isEmpty()) {
+                return rtDir.absoluteFilePath(xfiles.first());
+            }
+        }
+    }
+
+    // 4. Evrensel Fallback: Aktif seat0 oturumunun Leader PID'sinden veya Xorg -auth argümanından oku
+    QProcess pSeat;
+    pSeat.start(QStringLiteral("loginctl"), {QStringLiteral("show-seat"), QStringLiteral("seat0"), QStringLiteral("--property=ActiveSession"), QStringLiteral("--value")});
+    if (pSeat.waitForFinished(400) && pSeat.exitCode() == 0) {
+        const QString sessId = QString::fromLatin1(pSeat.readAllStandardOutput()).trimmed();
+        if (!sessId.isEmpty() && sessId != QLatin1String("0")) {
+            QProcess pLeader;
+            pLeader.start(QStringLiteral("loginctl"), {QStringLiteral("show-session"), sessId, QStringLiteral("--property=Leader"), QStringLiteral("--value")});
+            if (pLeader.waitForFinished(400) && pLeader.exitCode() == 0) {
+                const QString lPid = QString::fromLatin1(pLeader.readAllStandardOutput()).trimmed();
+                if (!lPid.isEmpty() && lPid != QLatin1String("0")) {
+                    QFile envFile(QStringLiteral("/proc/%1/environ").arg(lPid));
+                    if (envFile.open(QIODevice::ReadOnly)) {
+                        for (const QByteArray& entry : envFile.readAll().split('\0')) {
+                            if (entry.startsWith("XAUTHORITY=")) {
+                                const QString xa = QString::fromUtf8(entry.mid(11));
+                                if (QFile::exists(xa)) return xa;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     return {};
 #endif
 }
@@ -862,11 +1017,19 @@ bool SystemInfo::isDmUser(const QString& username)
            username.compare("NETWORK SERVICE", Qt::CaseInsensitive) == 0 ||
            username.compare("DefaultAccount", Qt::CaseInsensitive) == 0;
 #else
-    return username.isEmpty()    ||
-           username == "lightdm" ||
-           username == "sddm"    ||
-           username == "gdm"     ||
-           username == "gdm3";
+    const QString u = username.trimmed();
+    if (u.isEmpty()) return true;
+    if (u.startsWith(QStringLiteral("gdm"), Qt::CaseInsensitive) ||
+        u.contains(QStringLiteral("greeter"), Qt::CaseInsensitive)) {
+        return true;
+    }
+    return u == QLatin1String("lightdm")    ||
+           u == QLatin1String("sddm")       ||
+           u == QLatin1String("Debian-gdm") ||
+           u == QLatin1String("lxdm")       ||
+           u == QLatin1String("kdm")        ||
+           u == QLatin1String("xdm")        ||
+           u == QLatin1String("slim");
 #endif
 }
 
@@ -980,6 +1143,193 @@ bool SystemInfo::launchProcessInConsoleSession(const QString& appPath, const QSt
 #endif
 }
 
+bool SystemInfo::launchInputHelperInConsoleSession(const QString& appPath, const QStringList& args, void** outProcessHandle)
+{
+#if defined(Q_OS_WIN)
+    DWORD sessId = WTSGetActiveConsoleSessionId();
+    if (sessId == 0xFFFFFFFF) return false;
+
+    HANDLE hServiceToken = NULL;
+    if (!OpenProcessToken(GetCurrentProcess(), TOKEN_DUPLICATE | TOKEN_QUERY | TOKEN_ASSIGN_PRIMARY, &hServiceToken)) {
+        Logger::warning(QObject::tr("SystemInfo: Input helper için servis token'ı açılamadı (Hata: %1)").arg(GetLastError()));
+        return false;
+    }
+
+    HANDLE hTargetToken = NULL;
+    if (!DuplicateTokenEx(hServiceToken, MAXIMUM_ALLOWED, NULL, SecurityIdentification, TokenPrimary, &hTargetToken)) {
+        Logger::warning(QObject::tr("SystemInfo: Input helper için servis token'ı çoğaltılamadı (Hata: %1)").arg(GetLastError()));
+        CloseHandle(hServiceToken);
+        return false;
+    }
+    CloseHandle(hServiceToken);
+
+    if (!SetTokenInformation(hTargetToken, TokenSessionId, &sessId, sizeof(DWORD))) {
+        Logger::warning(QObject::tr("SystemInfo: Input helper token oturumu (%1) atanamadı (Hata: %2)").arg(sessId).arg(GetLastError()));
+        CloseHandle(hTargetToken);
+        return false;
+    }
+
+    STARTUPINFOW si = {};
+    si.cb = sizeof(STARTUPINFOW);
+    si.lpDesktop = const_cast<LPWSTR>(L"winsta0\\default");
+    si.dwFlags = STARTF_USESHOWWINDOW;
+    si.wShowWindow = SW_HIDE;
+
+    LPVOID pEnv = nullptr;
+    CreateEnvironmentBlock(&pEnv, hTargetToken, FALSE);
+
+    PROCESS_INFORMATION pi = {};
+    QString cmdLine = "\"" + QDir::toNativeSeparators(appPath) + "\"";
+    for (const QString& a : args) {
+        cmdLine += " \"" + a + "\"";
+    }
+
+    std::wstring wCmdLine = cmdLine.toStdWString();
+    std::wstring wWorkDir = QDir::toNativeSeparators(QFileInfo(appPath).absolutePath()).toStdWString();
+    BOOL res = CreateProcessAsUserW(
+        hTargetToken,
+        NULL,
+        &wCmdLine[0],
+        NULL,
+        NULL,
+        FALSE,
+        NORMAL_PRIORITY_CLASS | CREATE_UNICODE_ENVIRONMENT | CREATE_NO_WINDOW,
+        pEnv,
+        wWorkDir.empty() ? NULL : wWorkDir.c_str(),
+        &si,
+        &pi
+    );
+
+    if (pEnv) DestroyEnvironmentBlock(pEnv);
+    CloseHandle(hTargetToken);
+
+    if (res) {
+        CloseHandle(pi.hThread);
+        if (outProcessHandle) {
+            *outProcessHandle = pi.hProcess;
+        } else {
+            CloseHandle(pi.hProcess);
+        }
+        return true;
+    }
+    Logger::warning(QObject::tr("SystemInfo: Input helper başlatılamadı (Hata: %1)").arg(GetLastError()));
+    return false;
+#else
+    Q_UNUSED(appPath);
+    Q_UNUSED(args);
+    Q_UNUSED(outProcessHandle);
+    return false;
+#endif
+}
+
+void SystemInfo::applyWindowsUnattendedPolicies()
+{
+#if defined(Q_OS_WIN)
+    auto ensureDword = [](HKEY root, const wchar_t* subKey, const wchar_t* valueName, DWORD targetVal, int& updatedCount) {
+        HKEY hKey = NULL;
+        LONG res = RegCreateKeyExW(
+            root,
+            subKey,
+            0,
+            NULL,
+            REG_OPTION_NON_VOLATILE,
+            KEY_QUERY_VALUE | KEY_SET_VALUE | KEY_WOW64_64KEY,
+            NULL,
+            &hKey,
+            NULL
+        );
+        if (res != ERROR_SUCCESS) {
+            return;
+        }
+
+        DWORD currentVal = 0;
+        DWORD dataSize = sizeof(currentVal);
+        DWORD type = 0;
+        const bool alreadySet = (RegQueryValueExW(hKey, valueName, NULL, &type, reinterpret_cast<LPBYTE>(&currentVal), &dataSize) == ERROR_SUCCESS &&
+                                 type == REG_DWORD && currentVal == targetVal);
+        if (!alreadySet) {
+            if (RegSetValueExW(hKey, valueName, 0, REG_DWORD, reinterpret_cast<const BYTE*>(&targetVal), sizeof(targetVal)) == ERROR_SUCCESS) {
+                ++updatedCount;
+            }
+        }
+        RegCloseKey(hKey);
+    };
+
+    int updated = 0;
+    // 1. CloudContent — SCOOBE / Tüketici önerileri / Soft Landing kapatma (OneDrive eşitlemesine dokunulmaz)
+    const wchar_t* cloudContentKey = L"SOFTWARE\\Policies\\Microsoft\\Windows\\CloudContent";
+    ensureDword(HKEY_LOCAL_MACHINE, cloudContentKey, L"DisableCloudOptimizedContent", 1, updated);
+    ensureDword(HKEY_LOCAL_MACHINE, cloudContentKey, L"DisableConsumerAccountStateContent", 1, updated);
+    ensureDword(HKEY_LOCAL_MACHINE, cloudContentKey, L"DisableWindowsConsumerFeatures", 1, updated);
+    ensureDword(HKEY_LOCAL_MACHINE, cloudContentKey, L"DisableSoftLanding", 1, updated);
+
+    // 2. OOBE — İlk açılış gizlilik/kurulum sihirbazı kapatma
+    ensureDword(HKEY_LOCAL_MACHINE, L"SOFTWARE\\Policies\\Microsoft\\Windows\\OOBE", L"DisablePrivacyExperience", 1, updated);
+
+    // 3. System — İlk oturum açma animasyonunu kapatma
+    ensureDword(HKEY_LOCAL_MACHINE, L"SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Policies\\System", L"EnableFirstLogonAnimation", 0, updated);
+
+    if (updated > 0) {
+        Logger::info(QObject::tr("SystemInfo: Windows SCOOBE/OOBE katılımsız çalışma politikaları uygulandı (%1 HKLM anahtarı güncellendi).").arg(updated));
+    }
+#endif
+}
+
+void SystemInfo::applyWindowsUserUnattendedPolicies()
+{
+#if defined(Q_OS_WIN)
+    auto ensureDword = [](HKEY root, const wchar_t* subKey, const wchar_t* valueName, DWORD targetVal, int& updatedCount) {
+        HKEY hKey = NULL;
+        LONG res = RegCreateKeyExW(
+            root,
+            subKey,
+            0,
+            NULL,
+            REG_OPTION_NON_VOLATILE,
+            KEY_QUERY_VALUE | KEY_SET_VALUE | KEY_WOW64_64KEY,
+            NULL,
+            &hKey,
+            NULL
+        );
+        if (res != ERROR_SUCCESS) {
+            return;
+        }
+
+        DWORD currentVal = 0;
+        DWORD dataSize = sizeof(currentVal);
+        DWORD type = 0;
+        const bool alreadySet = (RegQueryValueExW(hKey, valueName, NULL, &type, reinterpret_cast<LPBYTE>(&currentVal), &dataSize) == ERROR_SUCCESS &&
+                                 type == REG_DWORD && currentVal == targetVal);
+        if (!alreadySet) {
+            if (RegSetValueExW(hKey, valueName, 0, REG_DWORD, reinterpret_cast<const BYTE*>(&targetVal), sizeof(targetVal)) == ERROR_SUCCESS) {
+                ++updatedCount;
+            }
+        }
+        RegCloseKey(hKey);
+    };
+
+    int updated = 0;
+    // 1. UserProfileEngagement — "Cihazınızı kurmayı bitirelim" (SCOOBE)
+    ensureDword(HKEY_CURRENT_USER,
+                L"Software\\Microsoft\\Windows\\CurrentVersion\\UserProfileEngagement",
+                L"ScoobeSystemSettingEnabled",
+                0,
+                updated);
+
+    // 2. ContentDeliveryManager — Welcome Experience ve ipuçları/öneriler
+    const wchar_t* cdmKey = L"Software\\Microsoft\\Windows\\CurrentVersion\\ContentDeliveryManager";
+    ensureDword(HKEY_CURRENT_USER, cdmKey, L"SubscribedContent-310093Enabled", 0, updated);
+    ensureDword(HKEY_CURRENT_USER, cdmKey, L"SubscribedContent-338389Enabled", 0, updated);
+    ensureDword(HKEY_CURRENT_USER, cdmKey, L"SubscribedContent-338393Enabled", 0, updated);
+    ensureDword(HKEY_CURRENT_USER, cdmKey, L"SubscribedContent-353694Enabled", 0, updated);
+    ensureDword(HKEY_CURRENT_USER, cdmKey, L"SubscribedContent-353696Enabled", 0, updated);
+
+    if (updated > 0) {
+        Logger::info(QObject::tr("SystemInfo: Kullanıcı bazlı Windows SCOOBE/Welcome anahtarları uygulandı (%1 HKCU anahtarı güncellendi).").arg(updated));
+    }
+#endif
+}
+
 bool SystemInfo::launchProcessInUserSession(const QString& username, const QString& appPath, const QStringList& args)
 {
 #if defined(Q_OS_WIN)
@@ -999,6 +1349,8 @@ bool SystemInfo::launchProcessInUserSession(const QString& username, const QStri
 
     QString display = ":0";
     QString xauth;
+    QString waylandDisplay;
+    QString sessionType;
 
     // Yöntem 1: loginctl üzerinden hedef kullanıcının oturum parametrelerini al
     QString sessId;
@@ -1025,6 +1377,12 @@ bool SystemInfo::launchProcessInUserSession(const QString& username, const QStri
     }
 
     if (!sessId.isEmpty() && sessId != "0" && sessId != "(null)") {
+        QProcess pType;
+        pType.start("loginctl", {"show-session", sessId, "--property=Type", "--value"});
+        if (pType.waitForFinished(500) && pType.exitCode() == 0) {
+            sessionType = QString::fromLatin1(pType.readAllStandardOutput()).trimmed();
+        }
+
         QProcess pDisp;
         pDisp.start("loginctl", {"show-session", sessId, "--property=Display", "--value"});
         if (pDisp.waitForFinished(500) && pDisp.exitCode() == 0) {
@@ -1035,24 +1393,47 @@ bool SystemInfo::launchProcessInUserSession(const QString& username, const QStri
         pLeader.start("loginctl", {"show-session", sessId, "--property=Leader", "--value"});
         if (pLeader.waitForFinished(500) && pLeader.exitCode() == 0) {
             QString lPid = QString::fromLatin1(pLeader.readAllStandardOutput()).trimmed();
-                if (!lPid.isEmpty() && lPid != "0") {
-                    QFile envFile(QString("/proc/%1/environ").arg(lPid));
-                    if (envFile.open(QIODevice::ReadOnly)) {
-                        const QByteArray data = envFile.readAll();
-                        const auto entries = data.split('\0');
-                        for (const auto& entry : entries) {
-                            if (entry.startsWith("XAUTHORITY=")) {
-                                xauth = QString::fromUtf8(entry.mid(11));
-                            } else if (entry.startsWith("DISPLAY=") && display == ":0") {
-                                display = QString::fromUtf8(entry.mid(8));
-                            }
+            if (!lPid.isEmpty() && lPid != "0") {
+                QFile envFile(QString("/proc/%1/environ").arg(lPid));
+                if (envFile.open(QIODevice::ReadOnly)) {
+                    const QByteArray data = envFile.readAll();
+                    const auto entries = data.split('\0');
+                    for (const auto& entry : entries) {
+                        if (entry.startsWith("XAUTHORITY=")) {
+                            xauth = QString::fromUtf8(entry.mid(11));
+                        } else if (entry.startsWith("DISPLAY=") && display == ":0") {
+                            display = QString::fromUtf8(entry.mid(8));
+                        } else if (entry.startsWith("WAYLAND_DISPLAY=")) {
+                            waylandDisplay = QString::fromUtf8(entry.mid(16));
+                        } else if (entry.startsWith("XDG_SESSION_TYPE=") && sessionType.isEmpty()) {
+                            sessionType = QString::fromUtf8(entry.mid(17));
                         }
                     }
                 }
             }
         }
+    }
 
-    // Yöntem 2: Standart dosya yolları
+    // Yöntem 2: Standart dosya yolları (Xauthority + Wayland soketi + Xwayland)
+    const QString runtimeDir = QString("/run/user/%1").arg(uid);
+    if (waylandDisplay.isEmpty()) {
+        QDir rtDir(runtimeDir);
+        const QStringList wlSockets = rtDir.entryList(QStringList() << "wayland-*", QDir::System | QDir::Files);
+        for (const QString& sock : wlSockets) {
+            if (!sock.endsWith(".lock")) {
+                waylandDisplay = sock;
+                break;
+            }
+        }
+        if (waylandDisplay.isEmpty() && sessionType == "wayland" && QFile::exists(runtimeDir + "/wayland-0")) {
+            waylandDisplay = QStringLiteral("wayland-0");
+        }
+    }
+
+    if (sessionType.isEmpty()) {
+        sessionType = waylandDisplay.isEmpty() ? QStringLiteral("x11") : QStringLiteral("wayland");
+    }
+
     if (xauth.isEmpty() || !QFile::exists(xauth)) {
         for (const QString& cand : {
             QString("/run/user/%1/gdm/Xauthority").arg(uid),
@@ -1067,8 +1448,8 @@ bool SystemInfo::launchProcessInUserSession(const QString& username, const QStri
     }
 
     if (xauth.isEmpty() || !QFile::exists(xauth)) {
-        QDir runUserDir(QString("/run/user/%1").arg(uid));
-        QStringList xauthFiles = runUserDir.entryList(QStringList() << "*Xauthority*" << "xauth_*", QDir::Files);
+        QDir runUserDir(runtimeDir);
+        QStringList xauthFiles = runUserDir.entryList(QStringList() << ".mutter-Xwaylandauth*" << "*Xauthority*" << "xauth_*", QDir::Files | QDir::Hidden);
         if (!xauthFiles.isEmpty()) {
             xauth = runUserDir.absoluteFilePath(xauthFiles.first());
         }
@@ -1078,13 +1459,31 @@ bool SystemInfo::launchProcessInUserSession(const QString& username, const QStri
         xauth = QString("/home/%1/.Xauthority").arg(username);
     }
 
-    const QString runtimeDir = QString("/run/user/%1").arg(uid);
     const QString dbusAddr = QString("unix:path=/run/user/%1/bus").arg(uid);
 
+    // Sistem dizininde (/usr/share/gnome-shell/extensions/okidia-kiosk@okidia.net) eklenti kuruluysa
+    // kullanıcının ev dizinindeki (.local/share) kopyayı temizle ki SYSTEM eklentisi olarak yüklensin
+    const QString sysExtDir = QStringLiteral("/usr/share/gnome-shell/extensions/okidia-kiosk@okidia.net");
+    if (QFile::exists(sysExtDir + QStringLiteral("/extension.js")) && pw->pw_dir) {
+        const QString userHome = QString::fromUtf8(pw->pw_dir);
+        const QString userExtDir = userHome + QStringLiteral("/.local/share/gnome-shell/extensions/okidia-kiosk@okidia.net");
+        if (QDir(userExtDir).exists()) {
+            QDir(userExtDir).removeRecursively();
+        }
+    }
+
+    QString waylandExports;
+    if (!waylandDisplay.isEmpty()) {
+        waylandExports = QString("QT_QPA_PLATFORM='wayland;xcb' WAYLAND_DISPLAY='%1' XDG_SESSION_TYPE='%2' ").arg(waylandDisplay, sessionType);
+    } else {
+        waylandExports = QString("XDG_SESSION_TYPE='%1' ").arg(sessionType);
+    }
+
     QString cmdArgs = args.join(' ');
-    QString fullCmd = QString("export DISPLAY='%1' XAUTHORITY='%2' XDG_RUNTIME_DIR='%3' DBUS_SESSION_BUS_ADDRESS='%4'; "
-                              "nohup \"%5\" %6 >/dev/null 2>&1 &")
-                      .arg(display, xauth, runtimeDir, dbusAddr, appPath, cmdArgs);
+    QString fullCmd = QString("export %1DISPLAY='%2' XAUTHORITY='%3' XDG_RUNTIME_DIR='%4' PULSE_RUNTIME_PATH='%4/pulse' DBUS_SESSION_BUS_ADDRESS='%5'; "
+                              "gnome-extensions enable okidia-kiosk@okidia.net >/dev/null 2>&1 || true; "
+                              "nohup \"%6\" %7 >/dev/null 2>&1 &")
+                      .arg(waylandExports, display, xauth, runtimeDir, dbusAddr, appPath, cmdArgs);
 
     QProcess proc;
     proc.start("su", {"-", username, "-c", fullCmd});
@@ -1110,12 +1509,76 @@ bool SystemInfo::getAudioSession(QString& outUsername, QString& outUid)
     outUid = "1000";
     return true;
 #else
-    QProcess p;
-    p.start("id", {"-u", user});
-    if (p.waitForFinished(2000) && p.exitCode() == 0) {
-        outUid = QString::fromLatin1(p.readAllStandardOutput()).trimmed();
+    auto hasAudioSocket = [](const QString& uidStr) -> bool {
+        if (uidStr.isEmpty() || uidStr == QLatin1String("0")) return false;
+        const QString base = QStringLiteral("/run/user/") + uidStr;
+        return QFile::exists(base + QStringLiteral("/pulse/native")) ||
+               QFile::exists(base + QStringLiteral("/pipewire-0"));
+    };
+
+    // 1. Önce aktif GUI kullanıcısının kendi ses soketi (PulseAudio/PipeWire) var mı doğrula
+    QString activeUid;
+    if (!user.isEmpty() && user != QLatin1String("root")) {
+        if (struct passwd* pw = ::getpwnam(user.toUtf8().constData())) {
+            activeUid = QString::number(pw->pw_uid);
+        } else {
+            QProcess p;
+            p.start(QStringLiteral("id"), {QStringLiteral("-u"), user});
+            if (p.waitForFinished(1000) && p.exitCode() == 0) {
+                activeUid = QString::fromLatin1(p.readAllStandardOutput()).trimmed();
+            }
+        }
+        if (hasAudioSocket(activeUid)) {
+            outUsername = user;
+            outUid = activeUid;
+            return true;
+        }
+    }
+
+    // 2. Aktif ekran kullanıcısının ses soketi yoksa (örn. X11 LightDM greeter),
+    //    /run/user/* altında canlı pulse/pipewire soketine sahip bir oturum ara (önce UID >= 1000).
+    QString bestNormalUser, bestNormalUid;
+    QString bestOtherUser, bestOtherUid;
+    QDir runUserDir(QStringLiteral("/run/user"));
+    for (const QString& uidStr : runUserDir.entryList(QDir::Dirs | QDir::NoDotAndDotDot)) {
+        if (!hasAudioSocket(uidStr)) continue;
+        bool ok = false;
+        const uint u = uidStr.toUInt(&ok);
+        if (!ok || u == 0) continue;
+
+        QString uname;
+        if (struct passwd* pw = ::getpwuid(static_cast<uid_t>(u))) {
+            if (pw->pw_name) uname = QString::fromUtf8(pw->pw_name);
+        }
+        if (uname.isEmpty()) uname = QStringLiteral("uid-") + uidStr;
+
+        if (u >= 1000 && u < 60000 && bestNormalUid.isEmpty()) {
+            bestNormalUser = uname;
+            bestNormalUid = uidStr;
+        } else if (bestOtherUid.isEmpty()) {
+            bestOtherUser = uname;
+            bestOtherUid = uidStr;
+        }
+    }
+
+    if (!bestNormalUid.isEmpty()) {
+        outUsername = bestNormalUser;
+        outUid = bestNormalUid;
         return true;
     }
+    if (!bestOtherUid.isEmpty()) {
+        outUsername = bestOtherUser;
+        outUid = bestOtherUid;
+        return true;
+    }
+
+    // 3. Canlı soket bulunamadıysa en azından aktif kullanıcının geçerli /run/user/<uid> dizinini dön
+    if (!activeUid.isEmpty() && QDir(QStringLiteral("/run/user/") + activeUid).exists()) {
+        outUsername = user;
+        outUid = activeUid;
+        return true;
+    }
+
     return false;
 #endif
 }

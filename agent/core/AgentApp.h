@@ -31,8 +31,17 @@ private:
     void sendSystemMetrics();
     void sendBlackFrame();
     void tryTriggerOta();
+    void flushPendingAudioToActiveTray();
+    void startInputHelper();
+    void stopInputHelper();
 
     static bool isUiMessage(okidia::MessageType t);
+
+    struct PendingAudioCommand {
+        okidia::Envelope env;
+        qint64           expiresAtMs = 0;
+    };
+    QList<PendingAudioCommand> m_pendingAudioQueue;
 
     TlsClient*                 m_tls = nullptr;
     AgentIpcServer*            m_ipcServer = nullptr;
@@ -48,15 +57,18 @@ private:
     bool m_detailedMetrics = false;
 
     QString    m_currentActive;
+    QString    m_currentIpcTarget;
     QProcess*  m_dmTrayProc = nullptr;
 #if defined(Q_OS_WIN)
     void*      m_hDmTrayProc = nullptr;
     void*      m_hUserTrayProc = nullptr;
     void*      m_hUserTrayWait = nullptr;
+    void*      m_hInputHelperProc = nullptr;
 #endif
     qint64     m_lastUserTrayLaunch = 0;
     int        m_userTrayCrashCount = 0;
     qint64     m_userTrayBackoffUntil = 0;
+    qint64     m_logoutInProgressUntil = 0;
 
     QString    m_ipcToken;
     QString    m_pendingOtaPath;

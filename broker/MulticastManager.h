@@ -25,6 +25,9 @@ public:
     // İstemci tekrar bağlandığında denemeyi yeniden başlat
     void handleClientReconnect(const QString& clientId);
 
+    // Aktif veya bekleyen tüm anons multicast dağıtımlarını iptal et (AUDIO_BROADCAST_STOP geldiğinde)
+    QStringList cancelAnnounceTasks(const QString& announceId = QString());
+
 private:
     struct ClientStream {
         QString   clientId;
@@ -38,6 +41,7 @@ private:
         QTimer*   timer      = nullptr;
         bool      isAnnounce = false;
         int       repeatCount = 1;
+        QString   announceId;
         enum State { PENDING, SENDING, SUCCESS, FAILED };
         State     state      = PENDING;
     };
@@ -52,6 +56,7 @@ private:
         bool      uploadComplete = false;
         bool      isAnnounce = false;
         int       repeatCount = 1;
+        QString   announceId;
         QMap<QString, ClientStream*> clients;
     };
 

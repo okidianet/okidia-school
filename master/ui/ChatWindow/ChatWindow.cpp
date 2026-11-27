@@ -168,11 +168,15 @@ ChatWindow::ChatWindow(RoomManager* rooms, PrivateChatManager* priv, SessionMana
     connect(m_priv, &PrivateChatManager::sessionClosed,   this, &ChatWindow::onPrivateSessionClosed);
     connect(m_priv, &PrivateChatManager::messageReceived, this, &ChatWindow::onPrivateMessageReceived);
     connect(m_priv, &PrivateChatManager::requestReceived, this, &ChatWindow::onPrivateRequestReceived);
+    connect(m_priv, &PrivateChatManager::ignoredUsersChanged, this, [this]() {
+        if (!m_activeId.isEmpty() && m_memberRefreshTimer) m_memberRefreshTimer->start();
+    });
 
     if (m_session) {
         connect(m_session, &SessionManager::roomJoinRequestReceived, this, &ChatWindow::onRoomJoinRequestReceived);
         connect(m_session, &SessionManager::roomJoinResponseReceived, this, &ChatWindow::onRoomJoinResponseReceived);
         connect(m_session, &SessionManager::handRaiseReceived, this, &ChatWindow::onHandRaiseReceived);
+        connect(m_session, &SessionManager::chatMuteStateReceived, this, &ChatWindow::onChatMuteStateReceived);
     }
 
     buildRoomTree();
@@ -967,12 +971,22 @@ void ChatWindow::refreshMemberList(const QString& roomId) {
     }
 
     // 4. Öğrenciler (Agent - AC) (A-Z)
+    const qint64 nowSecs = OkidiaUtils::nowSecs();
     for (const auto& entry : sortedStudents) {
         const RoomMember& m = entry.member;
+        const QString studentUser = m_session ? m_session->clientState(m.clientId).username : QString();
+        const QString userKey = PrivateChatManager::makeUserKey(m.clientId, studentUser);
+        const bool isMuted = (m_mutedUsers.value(userKey, 0) > nowSecs);
+        const bool isIgnored = (m_priv && m_priv->isUserIgnored(m.clientId, studentUser));
+
+        QStringList tags;
+        if (isMuted) tags << tr("Susturuldu");
+        if (isIgnored) tags << tr("Yoksayıldı");
+
         ItemData d;
         d.clientId = m.clientId;
         d.displayName = entry.display;
-        d.labelText = entry.display;
+        d.labelText = tags.isEmpty() ? entry.display : QString("%1 [%2]").arg(entry.display, tags.join(", "));
         if (m.online && m.windowOpen) {
             d.iconPath = ":/ui/online.svg";
             d.tooltip = tr("Aktif · Sohbet Açık");
@@ -981,6 +995,13 @@ void ChatWindow::refreshMemberList(const QString& roomId) {
             d.iconPath = ":/ui/offline.svg";
             d.tooltip = m.online ? tr("Sohbet Kapalı (Özel sohbet başlatılabilir)") : tr("Çevrimdışı");
             d.fgColor = isDark ? QColor("#64748b") : QColor("#94a3b8");
+        }
+        if (isMuted) {
+            const qint64 remMins = qMax<qint64>(1, (m_mutedUsers.value(userKey) - nowSecs + 59) / 60);
+            d.tooltip += tr(" · Sohbette susturuldu (~%1 dk kaldı)").arg(remMins);
+        }
+        if (isIgnored) {
+            d.tooltip += tr(" · İstekleri yoksayılıyor");
         }
         targetItems.append(d);
     }
@@ -1110,6 +1131,11 @@ void ChatWindow::onMemberContextMenuRequested(const QPoint& pos) {
     if (clientId.isEmpty()) return;
 
     const bool isSelf = (m_rooms && clientId == ("master:" + m_rooms->masterUsername()));
+    const bool isStudent = !clientId.startsWith("master:");
+    const QString studentUser = (isStudent && m_session) ? m_session->clientState(clientId).username : QString();
+    const QString userKey = PrivateChatManager::makeUserKey(clientId, studentUser);
+    const bool isMuted = isStudent && (m_mutedUsers.value(userKey, 0) > OkidiaUtils::nowSecs());
+    const bool isIgnored = isStudent && m_priv && m_priv->isUserIgnored(clientId, studentUser);
 
     QMenu menu(this);
     
@@ -1117,6 +1143,25 @@ void ChatWindow::onMemberContextMenuRequested(const QPoint& pos) {
     if (isSelf) {
         actionPrivateChat->setEnabled(false);
     }
+
+    QAction* actionMute5 = nullptr;
+    QAction* actionMute10 = nullptr;
+    QAction* actionUnmute = nullptr;
+    QAction* actionToggleIgnore = nullptr;
+
+    if (isStudent) {
+        menu.addSeparator();
+        if (isMuted) {
+            actionUnmute = menu.addAction(ThemeManager::icon(":/ui/unlock.svg"), tr("Sohbet Susturmasını Kaldır"));
+        } else {
+            actionMute5 = menu.addAction(ThemeManager::icon(":/ui/lock.svg"), tr("Sohbette Sustur (5 dk)"));
+            actionMute10 = menu.addAction(ThemeManager::icon(":/ui/lock.svg"), tr("Sohbette Sustur (10 dk)"));
+        }
+        actionToggleIgnore = menu.addAction(
+            ThemeManager::icon(isIgnored ? ":/ui/unlock.svg" : ":/ui/lock.svg"),
+            isIgnored ? tr("İstek Engelini Kaldır (Yoksaymayı Kaldır)") : tr("Özel Sohbet / Yardım İsteklerini Yoksay"));
+    }
+
     menu.addSeparator();
     
     QAction* actionVoiceCall = menu.addAction(tr("Sesli Arama (VoIP) [Yakında]"));
@@ -1128,6 +1173,20 @@ void ChatWindow::onMemberContextMenuRequested(const QPoint& pos) {
     QAction* selected = menu.exec(m_memberList->viewport()->mapToGlobal(pos));
     if (selected == actionPrivateChat && !isSelf) {
         m_priv->openDirect(clientId, displayName, {}, {});
+    } else if (actionUnmute && selected == actionUnmute && m_session) {
+        m_session->sendChatMuteState(clientId, studentUser, false, 0, QString());
+    } else if (actionMute5 && selected == actionMute5 && m_session) {
+        m_session->sendChatMuteState(clientId, studentUser, true, 300,
+            tr("Öğretmen tarafından 5 dakika sohbet kısıtlaması uygulandı."));
+    } else if (actionMute10 && selected == actionMute10 && m_session) {
+        m_session->sendChatMuteState(clientId, studentUser, true, 600,
+            tr("Öğretmen tarafından 10 dakika sohbet kısıtlaması uygulandı."));
+    } else if (actionToggleIgnore && selected == actionToggleIgnore && m_priv) {
+        if (isIgnored) {
+            m_priv->unignoreUser(clientId, studentUser);
+        } else {
+            m_priv->ignoreUser(clientId, studentUser);
+        }
     }
 }
 
@@ -1168,35 +1227,60 @@ void ChatWindow::onPrivateRequestReceived(const PendingRequest& req) {
     showAndRaise();
     QMessageBox msgBox(this);
     msgBox.setWindowTitle(tr("Özel Sohbet İsteği"));
-    msgBox.setText(tr("<b>%1</b> sizinle özel sohbet başlatmak istiyor.").arg(req.fromDisplay));
+    msgBox.setText(tr("<b>%1</b> sizinle özel sohbet başlatmak istiyor.").arg(req.fromDisplay.toHtmlEscaped()));
     msgBox.setIcon(QMessageBox::Question);
     QPushButton* btnAccept = msgBox.addButton(tr("Kabul Et"), QMessageBox::AcceptRole);
     QPushButton* btnReject = msgBox.addButton(tr("Reddet"), QMessageBox::RejectRole);
+    QPushButton* btnIgnore = msgBox.addButton(tr("Yoksay (Engelle)"), QMessageBox::DestructiveRole);
     msgBox.setDefaultButton(btnAccept);
     msgBox.exec();
 
     if (msgBox.clickedButton() == btnAccept) {
         m_priv->acceptRequest(req.requestId);
+    } else if (msgBox.clickedButton() == btnIgnore) {
+        m_priv->ignoreRequest(req.requestId);
     } else {
         m_priv->rejectRequest(req.requestId);
     }
 }
 
 void ChatWindow::onHandRaiseReceived(const QString& clientId, const QString& message) {
+    // Pencere görünür değilse diyalogu MainWindowChat gösterir (çift modal açılmasını önle)
+    if (!isVisible()) return;
+
     const ClientState s = m_session ? m_session->clientState(clientId) : ClientState{};
-    const QString name = s.hostname.isEmpty() ? clientId : (s.username.isEmpty() ? s.hostname : (s.hostname + " (" + s.username + ")"));
+    if (m_priv && m_priv->isUserIgnored(clientId, s.username)) {
+        return;
+    }
+
+    const QString name = RoomManager::formatStudentDisplayName(s.userDisplayName, s.username, s.hostname, clientId);
+
+    // Zaten açık bir özel sohbet varsa tekrar onay sorma; notu doğrudan oturuma ekle
+    if (m_priv) {
+        const QString existingSessionId = m_priv->sessionIdForPeer(clientId);
+        if (!existingSessionId.isEmpty()) {
+            const QString noteText = message.isEmpty()
+                ? tr("Öğrenci tekrar yardım talebinde bulundu.")
+                : tr("Öğrencinin Yardım Notu: \"%1\"").arg(message);
+            m_priv->appendSystemMessage(existingSessionId, noteText);
+            switchToTab(existingSessionId);
+            showAndRaise();
+            return;
+        }
+    }
 
     showAndRaise();
     QMessageBox msgBox(this);
     msgBox.setWindowTitle(tr("Öğrenci Yardım Talebi"));
-    QString promptText = tr("<b>%1</b> yardım talebinde bulundu!").arg(name);
+    QString promptText = tr("<b>%1</b> yardım talebinde bulundu!").arg(name.toHtmlEscaped());
     if (!message.isEmpty()) {
-        promptText += tr("<br><i>Mesaj: \"%1\"</i>").arg(message);
+        promptText += QString("<br><i>%1: \"%2\"</i>").arg(tr("Mesaj"), message.toHtmlEscaped());
     }
     promptText += tr("<br><br>Bu öğrenci ile özel sohbet başlatmak ister misiniz?");
     msgBox.setText(promptText);
     msgBox.setIcon(QMessageBox::Information);
     QPushButton* btnChat = msgBox.addButton(tr("Özel Sohbet Başlat"), QMessageBox::AcceptRole);
+    QPushButton* btnIgnore = msgBox.addButton(tr("Yoksay (Engelle)"), QMessageBox::DestructiveRole);
     msgBox.addButton(tr("Kapat"), QMessageBox::RejectRole);
     msgBox.setDefaultButton(btnChat);
     msgBox.exec();
@@ -1209,6 +1293,28 @@ void ChatWindow::onHandRaiseReceived(const QString& clientId, const QString& mes
                 m_priv->appendSystemMessage(sessionId, tr("Öğrencinin İlettiği Not: \"%1\"").arg(message));
             }
         }
+    } else if (msgBox.clickedButton() == btnIgnore) {
+        if (m_priv) {
+            m_priv->ignoreUser(clientId, s.username);
+        }
+    }
+}
+
+void ChatWindow::onChatMuteStateReceived(const QString& clientId, const QString& username,
+                                         bool muted, qint64 mutedUntil, int /*violationLevel*/, const QString& /*reason*/) {
+    if (clientId.isEmpty()) return;
+    QString effUser = username;
+    if (effUser.isEmpty() && m_session) {
+        effUser = m_session->clientState(clientId).username;
+    }
+    const QString userKey = PrivateChatManager::makeUserKey(clientId, effUser);
+    if (muted && mutedUntil > OkidiaUtils::nowSecs()) {
+        m_mutedUsers[userKey] = mutedUntil;
+    } else {
+        m_mutedUsers.remove(userKey);
+    }
+    if (!m_activeId.isEmpty() && m_memberRefreshTimer) {
+        m_memberRefreshTimer->start();
     }
 }
 

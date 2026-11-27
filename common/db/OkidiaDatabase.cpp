@@ -1003,6 +1003,45 @@ bool OkidiaDatabase::upsertMasterDevice(const MasterDeviceRecord& dev) {
     return ok;
 }
 
+bool OkidiaDatabase::removeMasterDevice(const QString& machineId, const QString& hostname) {
+    const QString mid = machineId.trimmed();
+    const QString host = hostname.trimmed();
+    if (mid.isEmpty() && host.isEmpty()) return false;
+
+    QSqlQuery q(m_db);
+    if (!mid.isEmpty() && !host.isEmpty()) {
+        q.prepare("DELETE FROM master_devices WHERE machine_id = ? OR LOWER(hostname) = LOWER(?)");
+        q.addBindValue(mid);
+        q.addBindValue(host);
+    } else if (!mid.isEmpty()) {
+        q.prepare("DELETE FROM master_devices WHERE machine_id = ?");
+        q.addBindValue(mid);
+    } else {
+        q.prepare("DELETE FROM master_devices WHERE LOWER(hostname) = LOWER(?)");
+        q.addBindValue(host);
+    }
+    if (!execQuery(q, "removeMasterDevice")) return false;
+
+    // Silinen bilgisayar bir kullanıcının yedek replika cihazı olarak atanmışsa referansı temizle
+    QSqlQuery qRep(m_db);
+    if (!mid.isEmpty() && !host.isEmpty()) {
+        qRep.prepare("UPDATE users SET replica_machine_id = '', replica_hostname = '' "
+                     "WHERE replica_machine_id = ? OR LOWER(replica_hostname) = LOWER(?)");
+        qRep.addBindValue(mid);
+        qRep.addBindValue(host);
+    } else if (!mid.isEmpty()) {
+        qRep.prepare("UPDATE users SET replica_machine_id = '', replica_hostname = '' WHERE replica_machine_id = ?");
+        qRep.addBindValue(mid);
+    } else {
+        qRep.prepare("UPDATE users SET replica_machine_id = '', replica_hostname = '' WHERE LOWER(replica_hostname) = LOWER(?)");
+        qRep.addBindValue(host);
+    }
+    qRep.exec();
+
+    setMetaValue("last_modified", QString::number(OkidiaUtils::nowSecs()));
+    return true;
+}
+
 MasterDeviceRecord OkidiaDatabase::masterDeviceById(const QString& machineId) const {
     if (machineId.isEmpty()) return {};
     QSqlQuery q(m_db);

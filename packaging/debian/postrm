@@ -19,13 +19,41 @@ log() {
     fi
 }
 
+restore_okidia_dconf_profiles() {
+    rm -f /etc/dconf/db/local.d/00-okidia-kiosk /etc/dconf/db/local.d/locks/okidia-kiosk \
+          /etc/dconf/db/gdm.d/00-okidia-kiosk /etc/dconf/db/gdm.d/locks/okidia-kiosk
+
+    # /etc/dconf/profile/user yedeğini geri yükle veya Okidia oluşturduysa sil
+    if [ -f /etc/dconf/profile/user.okidia-bak ]; then
+        mv -f /etc/dconf/profile/user.okidia-bak /etc/dconf/profile/user 2>/dev/null || true
+    elif [ -f /etc/dconf/profile/.okidia-created-user ]; then
+        rm -f /etc/dconf/profile/user /etc/dconf/profile/.okidia-created-user 2>/dev/null || true
+    fi
+    rm -f /etc/dconf/profile/.okidia-created-user 2>/dev/null || true
+
+    # /etc/dconf/profile/gdm yedeğini geri yükle veya Okidia oluşturduysa sil
+    if [ -f /etc/dconf/profile/gdm.okidia-bak ]; then
+        mv -f /etc/dconf/profile/gdm.okidia-bak /etc/dconf/profile/gdm 2>/dev/null || true
+    elif [ -f /etc/dconf/profile/.okidia-created-gdm ]; then
+        rm -f /etc/dconf/profile/gdm /etc/dconf/profile/.okidia-created-gdm 2>/dev/null || true
+    fi
+    rm -f /etc/dconf/profile/.okidia-created-gdm 2>/dev/null || true
+
+    if command -v dconf &>/dev/null; then
+        dconf update 2>/dev/null || true
+    fi
+}
+
 case "$1" in
   purge)
     # purge: yapılandırma ve logları sil
     rm -rf /etc/okidia /var/log/okidia /var/lib/okidia /etc/okidia/certs
     
-    # postinst içinde dinamik olarak oluşturulan dosyaları temizle
+    # postinst içinde dinamik olarak oluşturulan dosyaları ve dconf profillerini geri al
     rm -rf /usr/share/okidia
+    restore_okidia_dconf_profiles
+    sed -i '/okidia-broker/d' /etc/hosts 2>/dev/null || true
+    rm -f /tmp/okidia-tray-*.log /tmp/okidia_cap_*.png 2>/dev/null || true
     rm -rf /etc/systemd/system/okidia-broker.service.d
     rm -f /etc/systemd/system/okidia-agent.service
     rm -f /etc/systemd/system/okidia-agent-recover.service
@@ -38,9 +66,10 @@ case "$1" in
     fi
 
     # Kullanıcı ev dizinlerindeki (ve /root) .config ve .local/share kalıntılarını temizle
-    for user_home in /home/* /root; do
+    for user_home in /home/* /root /var/lib/gdm3 /var/lib/gdm; do
         if [ -d "$user_home" ]; then
-            rm -rf "$user_home/.config/okidia" \
+            rm -rf "$user_home/.local/share/gnome-shell/extensions/okidia-kiosk@okidia.net" \
+                   "$user_home/.config/okidia" \
                    "$user_home/.config/Okidia" \
                    "$user_home/.config/Unknown Organization" \
                    "$user_home/.config/okidia.conf" \
@@ -66,6 +95,10 @@ case "$1" in
         "All configuration files and data have been purged."
     ;;
   remove)
+    restore_okidia_dconf_profiles
+    for user_home in /home/* /root /var/lib/gdm3 /var/lib/gdm; do
+        [ -d "$user_home" ] && rm -rf "$user_home/.local/share/gnome-shell/extensions/okidia-kiosk@okidia.net" 2>/dev/null || true
+    done
     log "Paket dosyaları başarıyla kaldırıldı." \
         "Package files have been successfully removed."
     log "Tüm yapılandırmayı ve sertifikaları silmek için: sudo apt purge okidia-*" \

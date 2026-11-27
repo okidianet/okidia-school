@@ -273,6 +273,10 @@ MessageHandler::MessageHandler(BrokerContext* ctx)
     m_classHandler = std::make_unique<ClassHandler>(m_ctx);
     m_chatHandler = std::make_unique<ChatHandler>(m_ctx);
     m_systemHandler = std::make_unique<SystemHandler>(m_ctx);
+
+    m_ctx->syncChatMuteForClient = [this](const QString& clientId) {
+        if (m_chatHandler) m_chatHandler->syncMuteStateForClient(clientId);
+    };
 }
 
 MessageHandler::~MessageHandler() = default;
@@ -349,7 +353,8 @@ bool MessageHandler::isAuthorizedForMasterMessage(const okidia::Envelope& env, C
         okidia::MessageType::AUDIT_LOG_QUERY_REQ,
         okidia::MessageType::BROKER_SETTINGS_UPDATE,
         okidia::MessageType::CUSTOM_PROFILE_UPSERT_REQ,
-        okidia::MessageType::CUSTOM_PROFILE_DELETE_REQ
+        okidia::MessageType::CUSTOM_PROFILE_DELETE_REQ,
+        okidia::MessageType::DB_MASTER_DEVICE_DEL_REQ
     };
 
     if (ymOnlyTypes.contains(type)) {
@@ -681,6 +686,14 @@ void MessageHandler::process(const okidia::Envelope& env, Connection* conn, cons
             } else if (env.type() == okidia::MessageType::AUDIO_BROADCAST || env.type() == okidia::MessageType::AUDIO_BROADCAST_LIVE || env.type() == okidia::MessageType::AUDIO_BROADCAST_FILE) {
                 m_ctx->registry->acquireAgentLock(targetId, masterUserId, masterDisplayName, "Audio");
             } else if (env.type() == okidia::MessageType::AUDIO_STOP || env.type() == okidia::MessageType::AUDIO_BROADCAST_STOP) {
+                if (m_ctx->multicast) {
+                    QString stopId;
+                    okidia::AudioBroadcastCommand stopCmd;
+                    if (!env.payload().empty() && stopCmd.ParseFromString(env.payload())) {
+                        stopId = QString::fromStdString(stopCmd.announce_id());
+                    }
+                    m_ctx->multicast->cancelAnnounceTasks(stopId);
+                }
                 if (!m_ctx->registry->isAgentLockedByOther(targetId, masterUserId)) {
                     m_ctx->registry->releaseAgentLock(targetId);
                 }
@@ -763,6 +776,14 @@ void MessageHandler::process(const okidia::Envelope& env, Connection* conn, cons
             } else if (env.type() == okidia::MessageType::AUDIO_BROADCAST || env.type() == okidia::MessageType::AUDIO_BROADCAST_LIVE || env.type() == okidia::MessageType::AUDIO_BROADCAST_FILE) {
                 acquireBroadcastLock("Audio");
             } else if (env.type() == okidia::MessageType::AUDIO_STOP || env.type() == okidia::MessageType::AUDIO_BROADCAST_STOP) {
+                if (m_ctx->multicast) {
+                    QString stopId;
+                    okidia::AudioBroadcastCommand stopCmd;
+                    if (!env.payload().empty() && stopCmd.ParseFromString(env.payload())) {
+                        stopId = QString::fromStdString(stopCmd.announce_id());
+                    }
+                    m_ctx->multicast->cancelAnnounceTasks(stopId);
+                }
                 releaseBroadcastLock();
             }
         }
@@ -775,7 +796,9 @@ void MessageHandler::process(const okidia::Envelope& env, Connection* conn, cons
                     okidia::MessageType::SCREEN_INFO_REQUEST,
                     okidia::MessageType::APP_LIST_REQUEST,
                     okidia::MessageType::SCREEN_CAPTURE,
-                    okidia::MessageType::QUERY_LOCAL_USERS_REQ
+                    okidia::MessageType::QUERY_LOCAL_USERS_REQ,
+                    okidia::MessageType::SCREEN_FPS_SET,
+                    okidia::MessageType::SCREEN_STREAM_PAUSE
                 };
                 if (!allowedReadOnly.contains(env.type())) {
                     Logger::warning(QObject::tr("Broker: Kilitli istemciye yetkisiz komut engellendi -> Client: ") + targetId + QObject::tr(" Master: ") + masterUserId + QObject::tr(" Tip: ") + QString::number(env.type()));
@@ -920,7 +943,9 @@ void MessageHandler::process(const okidia::Envelope& env, Connection* conn, cons
                         okidia::MessageType::SCREEN_INFO_REQUEST,
                         okidia::MessageType::APP_LIST_REQUEST,
                         okidia::MessageType::SCREEN_CAPTURE,
-                        okidia::MessageType::QUERY_LOCAL_USERS_REQ
+                        okidia::MessageType::QUERY_LOCAL_USERS_REQ,
+                        okidia::MessageType::SCREEN_FPS_SET,
+                        okidia::MessageType::SCREEN_STREAM_PAUSE
                     };
                     if (!allowedReadOnly.contains(env.type())) {
                         continue;
@@ -956,7 +981,9 @@ void MessageHandler::process(const okidia::Envelope& env, Connection* conn, cons
                         okidia::MessageType::SCREEN_INFO_REQUEST,
                         okidia::MessageType::APP_LIST_REQUEST,
                         okidia::MessageType::SCREEN_CAPTURE,
-                        okidia::MessageType::QUERY_LOCAL_USERS_REQ
+                        okidia::MessageType::QUERY_LOCAL_USERS_REQ,
+                        okidia::MessageType::SCREEN_FPS_SET,
+                        okidia::MessageType::SCREEN_STREAM_PAUSE
                     };
                     if (!allowedReadOnly.contains(env.type())) {
                         Logger::warning(QObject::tr("Broker: Kilitli istemciye yetkisiz komut engellendi (hash) -> Client: ") + tid + QObject::tr(" Master: ") + masterUserId + QObject::tr(" Tip: ") + QString::number(env.type()));
@@ -970,14 +997,8 @@ void MessageHandler::process(const okidia::Envelope& env, Connection* conn, cons
         }
 
     } else {
-        // Agent'tan gelen mesaj
-        QString senderClientId;
-        for (const auto& c : m_ctx->registry->allClients()) {
-            if (c.connection == conn) {
-                senderClientId = c.clientId;
-                break;
-            }
-        }
+        // Agent'tan gelen mesaj (O(1) ters harita ile istemci kimliğini bul)
+        const QString senderClientId = m_ctx->registry->clientIdByConnection(conn);
         if (senderClientId.isEmpty()) return;
 
         // HEARTBEAT
@@ -1010,7 +1031,18 @@ void MessageHandler::process(const okidia::Envelope& env, Connection* conn, cons
             okidia::Envelope fwd = env;
             fwd.set_sequence_id(qHash(senderClientId));
             fwd.set_target_id(senderClientId.toStdString());
+            // Backpressure / Frame Drop: Yavaş Wi-Fi veya yoğun ağdaki Master soketi şişerse
+            // bayat artımlı karoları atla; kontrol komutlarının (HoL blocking) tıkanmasını önle.
+            // Tam kareler (SCREEN_FRAME / keyframe) daha yüksek toleransa sahiptir (4 MB),
+            // böylece 20-30 akıllı tahta aynı anda ilk kare bastığında thumbnail'lar boş kalmaz.
+            const qint64 backpressureLimit = (env.type() == okidia::MessageType::SCREEN_FRAME)
+                ? (4 * 1024 * 1024)
+                : (2 * 1024 * 1024);
             for (Connection* mConn : subs) {
+                if (!mConn || !mConn->isConnected()) continue;
+                if (mConn->bytesToWrite() > backpressureLimit) {
+                    continue;
+                }
                 mConn->sendEnvelope(fwd);
             }
             return;

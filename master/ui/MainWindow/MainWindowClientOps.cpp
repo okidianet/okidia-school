@@ -638,7 +638,7 @@ void MainWindow::buildClientMenu(QMenu* menu, const QString& contextClientId) {
 
             // Yalnızca Yönetici Master (YM) özel tipleri oluşturup silebilir
             if (m_session && m_session->activeUser().role == "YM") {
-                typeMenu->addAction(ThemeManager::icon(":/ui/settings.svg"), tr("Özel Tipleri Yönet..."), [this]() {
+                typeMenu->addAction(ThemeManager::icon(":/ui/settings.svg"), tr("İstemci Tiplerini Yönet..."), [this]() {
                     CustomProfilesDialog dlg(m_session, this);
                     dlg.exec();
                 });
@@ -778,7 +778,7 @@ void MainWindow::buildClientMenu(QMenu* menu, const QString& contextClientId) {
 
             if (m_session && m_session->activeUser().role == "YM") {
                 typeMenu->addSeparator();
-                typeMenu->addAction(ThemeManager::icon(":/ui/settings.svg"), tr("Özel Tipleri Yönet..."), [this]() {
+                typeMenu->addAction(ThemeManager::icon(":/ui/settings.svg"), tr("İstemci Tiplerini Yönet..."), [this]() {
                     CustomProfilesDialog dlg(m_session, this);
                     dlg.exec();
                 });

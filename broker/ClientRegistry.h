@@ -68,6 +68,9 @@ public:
     // sequence_id hash'inden clientId bul
     QString clientIdByHash(uint hash) const;
 
+    // Connection* işaretçisinden O(1) ile clientId bul (hot-path için)
+    QString clientIdByConnection(Connection* conn) const { return m_connToClientId.value(conn); }
+
     // Discovery — sertifikasız bekleyen bağlantılar (machineId → bağlantı)
     void addPendingDiscovery(const QString& machineId, Connection* conn);
     void storePendingRequest(const QString& machineId,
@@ -145,6 +148,7 @@ private slots:
 
 private:
     QMap<QString, RegisteredClient>         m_clients;
+    QHash<Connection*, QString>             m_connToClientId;    // O(1) Connection* → clientId ters haritası
     QMap<QString, Connection*>              m_pending;           // machineId → bağlantı
     QMap<QString, okidia::DiscoveryRequest> m_pendingRequests;   // machineId → DiscoveryRequest (CSR dahil)
     QSet<QString>                           m_revoked;

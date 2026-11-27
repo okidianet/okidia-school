@@ -107,6 +107,11 @@ AgentChatWindow::AgentChatWindow(const QString& myClientId,
     m_flashTimer->setInterval(500);
     connect(m_flashTimer, &QTimer::timeout, this, &AgentChatWindow::onFlashTimerTick);
 
+    // ── Spam Susturma Geri Sayım Timer'ı ───────────────────────────────────
+    m_muteTimer = new QTimer(this);
+    m_muteTimer->setInterval(1000);
+    connect(m_muteTimer, &QTimer::timeout, this, &AgentChatWindow::onMuteTimerTick);
+
     // ── Sinyal Bağlantıları ────────────────────────────────────────────────
     connect(m_tabBar, &QTabBar::currentChanged,    this, &AgentChatWindow::onTabChanged);
     connect(m_tabBar, &QTabBar::tabBarClicked,     this, [this](int idx) {
@@ -148,6 +153,7 @@ void AgentChatWindow::addRoom(const AgentRoomInfo& room) {
     sysMsg.isSystem = true;
     sysMsg.content = QString(tr("Sohbete katıldınız · %1")).arg(QDateTime::currentDateTime().toString("hh:mm"));
     tab->model->addMessage(sysMsg);
+    applyInputLockState(tab);
 
     if (m_tabBar->count() == 1 || m_activeId.isEmpty()) {
         m_tabBar->setCurrentIndex(idx);
@@ -528,10 +534,29 @@ void AgentChatWindow::showPrivateRequest(const QString& requestId,
     Q_UNUSED(fromDisplay);
 }
 
+void AgentChatWindow::applyInputLockState(TabItem* tab) {
+    if (!tab || !tab->widget || tab->isPrivate) return;
+    if (tab->roomLocked) {
+        tab->widget->setLocked(true, tr("Sohbet kilitli — mesaj gönderilemez"));
+        return;
+    }
+    const qint64 now = OkidiaUtils::nowSecs();
+    if (m_mutedUntil > now) {
+        const qint64 rem = m_mutedUntil - now;
+        const int mins = static_cast<int>(rem / 60);
+        const int secs = static_cast<int>(rem % 60);
+        const QString timeStr = QString("%1:%2").arg(mins, 2, 10, QChar('0')).arg(secs, 2, 10, QChar('0'));
+        tab->widget->setLocked(true, tr("Sohbet kısıtlı — kalan süre: %1").arg(timeStr));
+    } else {
+        tab->widget->setLocked(false, QString());
+    }
+}
+
 void AgentChatWindow::setChatLocked(const QString& roomId, bool locked) {
     auto* tab = m_tabs.value(roomId);
-    if (tab && tab->widget) {
-        tab->widget->setLocked(locked, tr("Sohbet kilitli — mesaj gönderilemez"));
+    if (tab) {
+        tab->roomLocked = locked;
+        applyInputLockState(tab);
     }
 
     for (int i = 0; i < m_tabBar->count(); ++i) {
@@ -540,6 +565,42 @@ void AgentChatWindow::setChatLocked(const QString& roomId, bool locked) {
             cleanName.remove(" (Kilitli)");
             m_tabBar->setTabText(i, cleanName + (locked ? " (Kilitli)" : ""));
             break;
+        }
+    }
+}
+
+void AgentChatWindow::setSpamMuted(qint64 mutedUntil, const QString& reason) {
+    const qint64 now = OkidiaUtils::nowSecs();
+    if (mutedUntil > now) {
+        m_mutedUntil = mutedUntil;
+        m_muteReason = reason;
+        if (m_muteTimer && !m_muteTimer->isActive()) {
+            m_muteTimer->start();
+        }
+    } else {
+        m_mutedUntil = 0;
+        m_muteReason.clear();
+        if (m_muteTimer && m_muteTimer->isActive()) {
+            m_muteTimer->stop();
+        }
+    }
+    for (auto* tab : m_tabs) {
+        if (tab && !tab->isPrivate) {
+            applyInputLockState(tab);
+        }
+    }
+}
+
+void AgentChatWindow::onMuteTimerTick() {
+    const qint64 now = OkidiaUtils::nowSecs();
+    if (m_mutedUntil <= now) {
+        m_mutedUntil = 0;
+        m_muteReason.clear();
+        if (m_muteTimer) m_muteTimer->stop();
+    }
+    for (auto* tab : m_tabs) {
+        if (tab && !tab->isPrivate) {
+            applyInputLockState(tab);
         }
     }
 }
@@ -732,12 +793,21 @@ void AgentChatWindow::changeEvent(QEvent* ev) {
 }
 
 void AgentChatWindow::onHelpButtonClicked() {
+    const qint64 now = OkidiaUtils::nowSecs();
+    if (m_lastHelpAt > 0 && (now - m_lastHelpAt) < 30) {
+        const qint64 rem = 30 - (now - m_lastHelpAt);
+        QMessageBox::information(this, tr("Yardım Talebi"),
+            tr("Yeni bir yardım talebi göndermek için lütfen %1 saniye bekleyin.").arg(rem));
+        return;
+    }
+
     bool ok = false;
     QString note = QInputDialog::getText(this, tr("Yardım İste (El Kaldır)"),
         tr("Öğretmeninize iletmek istediğiniz soru veya notu yazın (opsiyonel):"),
         QLineEdit::Normal, QString(), &ok);
     if (!ok) return;
 
+    m_lastHelpAt = OkidiaUtils::nowSecs();
     emit handRaiseRequested(note);
 
     QMessageBox::information(this, tr("Yardım Talebi"),

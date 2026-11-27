@@ -152,9 +152,11 @@ fi
 chown -R root:okidia "$OKIDIA_DIR" 2>/dev/null || true
 chown -R "$OKIDIA_USER:$OKIDIA_USER" "$LOG_DIR" "$LIB_DIR" 2>/dev/null || true
 
-# Kullanıcıları okidia grubuna dahil et
-for u in $(getent passwd | awk -F: '$3 >= 1000 && $3 < 65534 {print $1}'); do
-    usermod -aG "$OKIDIA_USER" "$u" 2>/dev/null || true
+# Kullanıcıları ve görüntü yöneticilerini (GDM/SDDM/LightDM) okidia grubuna dahil et
+for u in $(getent passwd | awk -F: '$3 >= 1000 && $3 < 65534 {print $1}') gdm Debian-gdm gdm3 sddm lightdm; do
+    if id "$u" &>/dev/null; then
+        usermod -aG "$OKIDIA_USER" "$u" 2>/dev/null || true
+    fi
 done
 
 # LIB_DIR gruba yazılabilir olsun
@@ -317,6 +319,109 @@ EOF
             pkill -x okidia-tray 2>/dev/null || true
             sleep 1
 
+            # GNOME Shell Wayland ekran paylaşımı koruma eklentisini tüm kullanıcılar ve GDM için kurulum anında hazırla
+            # (Böylece kurulum GDM login ekranındayken veya SSH/OTA ile yapılsa bile ilk oturum açılışında sıfır gecikmeyle aktif olur)
+            if [ -d /usr/share/gnome-shell/extensions/okidia-kiosk@okidia.net ]; then
+                if command -v dconf &>/dev/null; then
+                    mkdir -p /etc/dconf/profile /etc/dconf/db/local.d /etc/dconf/db/gdm.d
+
+                    # Kaldırma (uninstall/purge) sırasında sistem ayarlarını eksiksiz geri yükleyebilmek için
+                    # mevcut dconf profillerini yedekle veya Okidia tarafından oluşturulduğunu işaretle
+                    if [ -f /etc/dconf/profile/user ] && [ ! -f /etc/dconf/profile/user.okidia-bak ] && [ ! -f /etc/dconf/profile/.okidia-created-user ]; then
+                        cp -a /etc/dconf/profile/user /etc/dconf/profile/user.okidia-bak
+                    elif [ ! -f /etc/dconf/profile/user ] && [ ! -f /etc/dconf/profile/user.okidia-bak ]; then
+                        touch /etc/dconf/profile/.okidia-created-user
+                    fi
+
+                    if [ -f /etc/dconf/profile/gdm ] && [ ! -f /etc/dconf/profile/gdm.okidia-bak ] && [ ! -f /etc/dconf/profile/.okidia-created-gdm ]; then
+                        cp -a /etc/dconf/profile/gdm /etc/dconf/profile/gdm.okidia-bak
+                    elif [ ! -f /etc/dconf/profile/gdm ] && [ ! -f /etc/dconf/profile/gdm.okidia-bak ]; then
+                        touch /etc/dconf/profile/.okidia-created-gdm
+                    fi
+
+                    if [ ! -f /etc/dconf/profile/user ] || ! grep -q "system-db:local" /etc/dconf/profile/user 2>/dev/null; then
+                        printf "user-db:user\nsystem-db:local\n" > /etc/dconf/profile/user
+                    fi
+
+                    # Ubuntu 24.04/26.04'te /etc/dconf/profile/gdm varsayılan olarak bulunmaz (/usr/share/dconf/profile/gdm kullanılır).
+                    # GDM greeter (gdm-greeter DynamicUser) oturumunun system-db:gdm ve system-db:local veritabanlarını
+                    # okuması için mevcut file-db satırını koruyarak /etc/dconf/profile/gdm oluştur.
+                    GDM_FILE_DB=""
+                    if [ -f /etc/dconf/profile/gdm.okidia-bak ]; then
+                        GDM_FILE_DB=$(grep "^file-db:" /etc/dconf/profile/gdm.okidia-bak 2>/dev/null | head -1)
+                    elif [ -f /usr/share/dconf/profile/gdm ]; then
+                        GDM_FILE_DB=$(grep "^file-db:" /usr/share/dconf/profile/gdm 2>/dev/null | head -1)
+                    fi
+                    if [ -z "$GDM_FILE_DB" ]; then
+                        if [ -f /var/lib/gdm3/greeter-dconf-defaults ]; then
+                            GDM_FILE_DB="file-db:/var/lib/gdm3/greeter-dconf-defaults"
+                        elif [ -f /usr/share/gdm/greeter-dconf-defaults ]; then
+                            GDM_FILE_DB="file-db:/usr/share/gdm/greeter-dconf-defaults"
+                        fi
+                    fi
+                    {
+                        echo "user-db:user"
+                        echo "system-db:gdm"
+                        echo "system-db:local"
+                        [ -n "$GDM_FILE_DB" ] && echo "$GDM_FILE_DB"
+                    } > /etc/dconf/profile/gdm
+
+                    EXT_LIST="'okidia-kiosk@okidia.net'"
+                    for sys_ext in "ubuntu-appindicators@ubuntu.com" "ubuntu-dock@ubuntu.com" "ding@rastersoft.com" "tiling-assistant@ubuntu.com"; do
+                        if [ -d "/usr/share/gnome-shell/extensions/$sys_ext" ]; then
+                            EXT_LIST="$EXT_LIST, '$sys_ext'"
+                        fi
+                    done
+
+                    for db_dir in "/etc/dconf/db/local.d" "/etc/dconf/db/gdm.d"; do
+                        # Eski salt-okunur kilitleri temizle (çalışma anında EnableExtension / gsettings çağrılarını engellememesi için)
+                        rm -f "$db_dir/locks/okidia-kiosk" 2>/dev/null || true
+                        cat > "$db_dir/00-okidia-kiosk" << EOF
+[org/gnome/shell]
+disable-user-extensions=false
+disable-extension-version-validation=true
+enabled-extensions=[$EXT_LIST]
+EOF
+                    done
+                    dconf update 2>/dev/null || true
+                fi
+
+                # Eklenti /usr/share/gnome-shell/extensions altında SYSTEM eklentisi olarak bulunduğundan,
+                # GDM ve kilit ekranı (gdm / unlock-dialog) modlarında PER_USER olarak engellenmemesi için
+                # ev dizinlerindeki (.local/share) eski kopyaları temizle
+                for u_home in /home/* /root /var/lib/gdm3 /var/lib/gdm; do
+                    if [ -d "$u_home/.local/share/gnome-shell/extensions/okidia-kiosk@okidia.net" ]; then
+                        rm -rf "$u_home/.local/share/gnome-shell/extensions/okidia-kiosk@okidia.net" 2>/dev/null || true
+                    fi
+                done
+
+                # Tüm aktif Wayland/GNOME oturumlarında (GDM gdm-greeter DynamicUser dahil) eklentiyi D-Bus üzerinden canlı etkinleştir
+                for rt_dir in /run/user/*; do
+                    if [ -S "$rt_dir/bus" ]; then
+                        rt_uid=$(stat -c '%u' "$rt_dir" 2>/dev/null)
+                        rt_gid=$(stat -c '%g' "$rt_dir" 2>/dev/null)
+                        if [ -n "$rt_uid" ] && [ "$rt_uid" != "0" ] && command -v setpriv &>/dev/null; then
+                            setpriv --reuid="$rt_uid" --regid="$rt_gid" --clear-groups /bin/sh -c \
+                                "HOME='$rt_dir' XDG_RUNTIME_DIR='$rt_dir' DBUS_SESSION_BUS_ADDRESS='unix:path=$rt_dir/bus' \
+                                 gsettings set org.gnome.shell disable-user-extensions false >/dev/null 2>&1 || true; \
+                                 HOME='$rt_dir' XDG_RUNTIME_DIR='$rt_dir' DBUS_SESSION_BUS_ADDRESS='unix:path=$rt_dir/bus' \
+                                 gsettings set org.gnome.shell enabled-extensions \"['okidia-kiosk@okidia.net']\" >/dev/null 2>&1 || true; \
+                                 HOME='$rt_dir' XDG_RUNTIME_DIR='$rt_dir' DBUS_SESSION_BUS_ADDRESS='unix:path=$rt_dir/bus' \
+                                 gdbus call --session --dest org.gnome.Shell.Extensions --object-path /org/gnome/Shell/Extensions \
+                                 --method org.gnome.Shell.Extensions.EnableExtension 'okidia-kiosk@okidia.net' >/dev/null 2>&1 || true" 2>/dev/null || true
+                        fi
+                    fi
+                done
+
+                # Eğer sistem şu an GDM giriş ekranındaysa (gnome-shell --mode=gdm çalışıyorsa),
+                # GJS ES Module önbelleğinin ve yeni /etc/dconf/profile/gdm profilinin anında yüklenmesi için
+                # yalnızca GDM greeter gnome-shell sürecini tazele (GDM 1 sn içinde otomatik yeniden başlatır).
+                if pgrep -f "gnome-shell.*--mode=gdm" >/dev/null 2>&1; then
+                    pkill -TERM -f "gnome-shell.*--mode=gdm" 2>/dev/null || true
+                    sleep 1
+                fi
+            fi
+
             # Mevcut oturumdaki kullanıcı için tray'i başlat
             ACTIVE_USER=$(loginctl show-seat seat0 --property=ActiveSession --value 2>/dev/null | xargs -I{} loginctl show-session {} --property=Name --value 2>/dev/null)
             if [ -z "$ACTIVE_USER" ] || [ "$ACTIVE_USER" = "root" ]; then
@@ -340,10 +445,27 @@ EOF
                 USER_DISP=$(loginctl show-seat seat0 --property=ActiveSession --value 2>/dev/null | xargs -I{} loginctl show-session {} --property=Display --value 2>/dev/null)
                 [ -z "$USER_DISP" ] && USER_DISP=":0"
 
+                USER_WL=""
+                for ws in "/run/user/$USER_UID"/wayland-*; do
+                    if [ -S "$ws" ] && [[ "$ws" != *.lock ]]; then
+                        USER_WL=$(basename "$ws")
+                        break
+                    fi
+                done
+
+                # Aktif oturumda GNOME Shell eklentisini D-Bus üzerinden canlı etkinleştir
+                if [ -d /usr/share/gnome-shell/extensions/okidia-kiosk@okidia.net ]; then
+                    su - "$ACTIVE_USER" -c "XDG_RUNTIME_DIR=/run/user/$USER_UID DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$USER_UID/bus gnome-extensions enable okidia-kiosk@okidia.net" 2>/dev/null || true
+                    su - "$ACTIVE_USER" -c "XDG_RUNTIME_DIR=/run/user/$USER_UID DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$USER_UID/bus gdbus call --session --dest org.gnome.Shell.Extensions --object-path /org/gnome/Shell/Extensions --method org.gnome.Shell.Extensions.EnableExtension 'okidia-kiosk@okidia.net'" >/dev/null 2>&1 || true
+                fi
+
+                WL_ENV=""
+                [ -n "$USER_WL" ] && WL_ENV="WAYLAND_DISPLAY=$USER_WL XDG_SESSION_TYPE=wayland "
+
                 log "Tray başlatılıyor: $ACTIVE_USER (Ekran: $USER_DISP, Xauth: $USER_XAUTH)" \
                     "Starting Agent tray for: $ACTIVE_USER (Display: $USER_DISP, Xauth: $USER_XAUTH)"
                 su - "$ACTIVE_USER" -c \
-                    "DISPLAY=$USER_DISP XAUTHORITY=$USER_XAUTH XDG_RUNTIME_DIR=/run/user/$USER_UID DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$USER_UID/bus \
+                    "${WL_ENV}DISPLAY=$USER_DISP XAUTHORITY=$USER_XAUTH XDG_RUNTIME_DIR=/run/user/$USER_UID DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$USER_UID/bus \
                      nohup /usr/bin/okidia-tray >/dev/null 2>&1 &" || true
             fi
         fi

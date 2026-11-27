@@ -203,7 +203,7 @@ void SshFileManagerWidget::onTransferToRemoteClicked() {
                             if (!ok) m_client->executeSync(QString("rm -f %1").arg(remoteTar), 5000);
                         } else {
                             errStr = tr("Windows klasör açma başarısız: ") + out.trimmed();
-                            m_client->executeSync(QString("cmd.exe /c del /f /q \"%1\"").arg(QDir::toNativeSeparators(remoteTar)), 5000);
+                            m_client->executeSync(OkidiaUtils::remoteDeleteCmd(remoteTar, false, true), 5000);
                         }
                     } else {
                         errStr = m_client->lastError();
@@ -444,7 +444,7 @@ void SshFileManagerWidget::onTransferToLocalClicked() {
 
                     // cleanup remote tar
                     if (m_isRemoteWindows) {
-                        m_client->executeSync(QString("cmd.exe /c del /f /q \"%1\"").arg(QDir::toNativeSeparators(remoteTar)), 5000);
+                        m_client->executeSync(OkidiaUtils::remoteDeleteCmd(remoteTar, false, true), 5000);
                     } else {
                         QString pw;
                         QMetaObject::invokeMethod(this, [this, &pw]() { pw = m_sudoPassword; }, Qt::BlockingQueuedConnection);

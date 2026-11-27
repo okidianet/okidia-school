@@ -10,6 +10,7 @@ class QComboBox;
 class QPushButton;
 class QLabel;
 class QTimer;
+class QProgressBar;
 
 class LiveAnnounceDialog : public QDialog {
     Q_OBJECT
@@ -38,6 +39,7 @@ private:
     QPushButton*    m_btnClose       = nullptr;
     QLabel*         m_statusLabel    = nullptr;
     QLabel*         m_timerLabel     = nullptr;
+    QProgressBar*   m_levelBar       = nullptr;
     QTimer*         m_elapsedTimer   = nullptr;
     int             m_elapsedSeconds = 0;
 };

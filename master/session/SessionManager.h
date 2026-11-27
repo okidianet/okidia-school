@@ -77,6 +77,7 @@ public:
     // Broker'a bağlandığında tüm agent'lardan CLIENT_INFO + frame yenile
     // Yeniden bağlantı sonrası veya ağ değişimi sonrası çağrılır.
     void sendRefreshBroadcast();
+    int  refreshVisibleThumbnails();
     void setVisibleClients(const QSet<QString>& visibleClients);
     QSet<QString> visibleClients() const { return m_visibleClients; }
     void updateAdaptiveFps();
@@ -175,10 +176,15 @@ public:
     void stopLiveAudioBroadcast();
     bool isLiveAudioBroadcasting() const { return m_liveAudioSource != nullptr; }
 
+    // Herhangi bir ses dosyasını (MP3, OGG, M4A, FLAC, WAV) standart 24kHz 16-bit Mono PCM WAV'a dönüştürür
+    static QString normalizeAudioFileToWav(const QString& inputPath, QString* errorOut = nullptr);
+
     // Anons gönder: file transfer → /tmp → AUDIO_PLAY_LOCAL
     void sendAnons(const QString& wavPath,
                    const QStringList& targets,
                    int repeatCount = 1);
+    bool isAnnounceActive() const { return !m_activeAnnounceId.isEmpty() || m_liveAudioSource != nullptr; }
+    QString activeAnnounceId() const { return m_activeAnnounceId; }
 
     // Discovery — onay/yoksayma
     void approveDiscovery(const QString& targetId,
@@ -269,6 +275,7 @@ public:
     bool sendDbUserRevoke(const QString& userId, const QString& classId);
     bool sendDbTeacherUpsert(const TeacherRecord& teacher);
     bool sendDbTeacherDelete(const QString& teacherId);
+    bool sendDbMasterDeviceDelete(const QString& machineId, const QString& hostname = QString());
     bool sendTeacherKeySyncToAll();
     bool sendQueryLocalUsers(const QString& clientId);
     bool sendAuditLogRecord(const QString& actor, const QString& target, const QString& detail, const QString& category, const QString& userId, const QString& masterId, qint64 timestamp);
@@ -281,6 +288,8 @@ public:
                            const QString& actor = QString(),
                            const QString& target = QString());
     bool sendChatHistoryRequest(const QString& roomId, int limit, qint64 beforeTimestamp);
+    void sendChatMuteState(const QString& clientId, const QString& username,
+                           bool muted, int durationSecs = 0, const QString& reason = QString());
 
     void requestJoinCode(const QString& userId);
     void sendDbSyncSignal();
@@ -312,6 +321,7 @@ public:
     void setPendingCredentials(const QString& username, const QString& hash);
     void setOfflineMode(bool offline) { m_isOfflineMode = offline; }
     bool isOfflineMode() const;
+    bool isAuthenticated() const { return m_isAuthenticated; }
     bool isConnecting() const { return m_connecting; }
     void triggerReconnect();
     void setKickedToOffline(bool kicked) { m_isKickedToOffline = kicked; }
@@ -473,6 +483,12 @@ signals:
     void chatLockStateReceived (const QString& classId,
                                  bool chatLocked,
                                  bool privateLocked);
+    void chatMuteStateReceived (const QString& clientId,
+                                 const QString& username,
+                                 bool muted,
+                                 qint64 mutedUntil,
+                                 int violationLevel,
+                                 const QString& reason);
 
     // El kaldırma
     void handRaiseReceived(const QString& clientId,
@@ -539,6 +555,13 @@ signals:
     // Komut Sonucu / Kilit Ret Bildirimi
     void commandResultReceived(const QString& clientId, bool success, const QString& errorMsg);
 
+    // Mikrofon / Canlı Yayın Ses Seviyesi (0..100 VU metre) ve Aktif Anons Durumu
+    void audioInputLevelChanged(int levelPercent);
+    void announceActiveStateChanged(bool active, const QString& description);
+
+    // Master Bilgisayar Kaydı Silme Sonucu
+    void dbMasterDeviceDeleteResult(bool success, const QString& errorMsg);
+
 
 private slots:
     void onBrokerConnected(Connection* conn);
@@ -583,15 +606,30 @@ private:
 
     // Anons kaydı — Saf Qt6 QAudioSource (cross-platform standart ses kaydı)
     class QAudioSource*         m_audioSource    = nullptr;
+    class QIODevice*            m_recordIoDevice = nullptr;
     class QFile*                m_audioRecordFile = nullptr;
     QAudioFormat                m_recordFormat;
     QString                     m_audioWavPath;
+    float                       m_recDcPrevIn    = 0.0f;
+    float                       m_recDcPrevOut   = 0.0f;
+    float                       m_recAgcGain     = 4.0f;
 
     // Canlı Anons Yayını — Saf Qt6 QAudioSource (Push-to-Talk)
     class QAudioSource*         m_liveAudioSource = nullptr;
     class QIODevice*            m_liveIoDevice    = nullptr;
     QAudioFormat                m_liveFormat;
     QStringList                 m_liveBroadcastTargets;
+    QString                     m_liveAnnounceId;
+    uint32_t                    m_liveSeqCounter  = 0;
+    float                       m_liveDcPrevIn    = 0.0f;
+    float                       m_liveDcPrevOut   = 0.0f;
+    float                       m_liveAgcGain     = 4.0f;
+
+    // Aktif dosya/kayıt anonsu takibi (Yayını Durdur için)
+    class FileSender*           m_activeAnonsSender = nullptr;
+    QString                     m_activeAnnounceId;
+    QStringList                 m_activeAnnounceTargets;
+    class QTimer*               m_announceAutoResetTimer = nullptr;
     // Client grup bilgisi (tree node id)
     QMap<QString, QString>     m_clientGroups;
     QSet<QString>              m_ignoredMachineIds;
@@ -614,6 +652,7 @@ private:
      QString             m_passwordHash;
 
      // Çevrimdışı mod durumu
+     bool                m_isAuthenticated = false;
      bool                m_isOfflineMode = false;
      bool                m_isKickedToOffline = false;
      bool                m_isRemoteConnection = false;
@@ -628,6 +667,8 @@ private:
      QMap<QString, qint64> m_delegationExpiry;
      QTimer*             m_delegationTimer = nullptr;  // delege bitiş kontrolü
      QTimer*             m_dbSyncDebounceTimer = nullptr; // DB sync sinyallerini debounce etmek için
+     QTimer*             m_reauthWatchdogTimer = nullptr; // Yeniden bağlantıda LOGIN_RESPONSE zaman aşımı koruması
+     bool                m_reauthRetryAttempted = false;
 
      class MasterUpdater* m_masterUpdater = nullptr;
      MasterUpdateInfo     m_availableMasterUpdate;
@@ -642,6 +683,12 @@ private:
     void loadRevokedList();
     void saveRevokedList() const;
     void checkDelegationExpiry();  // timer ile çağrılır, süresi biten delegeleri temizler
+    void onBlankThumbnailWatchdog(); // Boş/siyah kalan görünür thumbnail'lar için otomatik kademeli keyframe talebi
+    void onStaggerRefreshTick();     // Manuel veya toplu thumbnail yenilemesinde kademeli gönderim
+    QTimer* m_blankThumbWatchdog = nullptr;
+    int     m_blankWatchdogCursor = 0;
+    QTimer* m_staggerRefreshTimer = nullptr;
+    QStringList m_staggerRefreshQueue;
 
     void handleClientInfo(const okidia::Envelope& env);
     void cleanupRejectedClient(const QString& machineId);

@@ -21,6 +21,10 @@
 #include <QDateTime>
 #include <QLocalServer>
 #include <QLocalSocket>
+#if !defined(Q_OS_WIN)
+#  include <unistd.h>
+#  include <pwd.h>
+#endif
 #include "auth/OfflineAuthManager.h"
 #include "ui/SmartboardLockOverlay/SmartboardLockOverlay.h"
 
@@ -105,7 +109,7 @@ static LONG WINAPI QtTlsCrashFilter(PEXCEPTION_POINTERS pEx) {
 #include "../common/ui/ThemeManager.h"
 
 // ── Yardımcı: Tam ekran karesi gönder (Gizlilik maskesi dahil) ───────────
-static void sendFullFrame(LocalConnection* localConn, ScreenCapture* capture, uint32_t type, CommandHandler* cmdHandler) {
+static void sendFullFrame(LocalConnection* localConn, ScreenCapture* capture, uint32_t type, CommandHandler* cmdHandler, int retryCount = 0) {
     if (!localConn || !localConn->isConnected()) return;
 
     // Backpressure guard: Sokette aşırı veri birikmişse ekranı boş yere yakalama
@@ -119,7 +123,16 @@ static void sendFullFrame(LocalConnection* localConn, ScreenCapture* capture, ui
     }
 
     QByteArray rf = capture->captureFullFrame();
-    if (rf.isEmpty()) return;
+    if (rf.isEmpty()) {
+        // Wayland'da PipeWire akışı ilk çağrıda asenkron başladığı için ilk kare ~200-400ms sonra hazır olur.
+        // İlk tam kare yakalanana kadar otomatik yeniden dene.
+        if (retryCount < 15) {
+            QTimer::singleShot(400, localConn, [localConn, capture, type, cmdHandler, retryCount]() {
+                sendFullFrame(localConn, capture, type, cmdHandler, retryCount + 1);
+            });
+        }
+        return;
+    }
 
     okidia::ScreenFrame frame;
     frame.set_width(static_cast<uint32_t>(capture->screenWidth()));
@@ -163,6 +176,15 @@ int main(int argc, char* argv[]) {
     QString resolvedUser = QString::fromLocal8Bit(qgetenv("USER"));
     if (resolvedUser.isEmpty()) resolvedUser = QString::fromLocal8Bit(qgetenv("USERNAME"));
     if (resolvedUser.isEmpty()) resolvedUser = QString::fromLocal8Bit(qgetenv("LOGNAME"));
+#if !defined(Q_OS_WIN)
+    if (resolvedUser.isEmpty() || resolvedUser == QStringLiteral("root")) {
+        if (struct passwd* pw = ::getpwuid(::getuid())) {
+            if (pw->pw_name) {
+                resolvedUser = QString::fromUtf8(pw->pw_name);
+            }
+        }
+    }
+#endif
     const QString trayUser = forcedUsername.isEmpty() ? resolvedUser : forcedUsername;
 
 #if defined(Q_OS_WIN)
@@ -271,15 +293,34 @@ int main(int argc, char* argv[]) {
     // bu sabit değer sayesinde yanlış kayıt olmaz, routing doğru çalışır.
     // DM tray (--username lightdm): login ekranı için sabit.
     // Normal tray: oturumu açan kullanıcı, değişmez.
-    const QString startupUsername = forcedUsername.isEmpty()
-        ? SystemInfo::username()
-        : forcedUsername;
+    const QString startupUsername = !forcedUsername.isEmpty()
+        ? forcedUsername
+        : (!resolvedUser.isEmpty() && resolvedUser != QStringLiteral("root")
+               ? resolvedUser
+               : SystemInfo::username());
 
-    Logger::init(OkidiaConfig::logDir() + "/okidia-agent-tray.log");
+    QString trayLogPath = OkidiaConfig::logDir() + "/okidia-agent-tray.log";
+#if !defined(Q_OS_WIN)
+    {
+        QFile probe(trayLogPath);
+        if (!probe.open(QIODevice::WriteOnly | QIODevice::Append)) {
+            trayLogPath = QDir::tempPath() + "/okidia-tray-" + startupUsername + ".log";
+        } else {
+            probe.close();
+        }
+    }
+#endif
+    Logger::init(trayLogPath);
     Logger::info(QObject::tr("OKIDIA Agent Tray başlatılıyor..."));
     Logger::info(QObject::tr("Kullanıcı: ") + startupUsername);
     if (!forcedUsername.isEmpty())
         Logger::info(QObject::tr("Mod: DM tray (login ekranı)"));
+
+#if defined(Q_OS_WIN)
+    if (!SystemInfo::isDmUser(startupUsername)) {
+        SystemInfo::applyWindowsUserUnattendedPolicies();
+    }
+#endif
 
     // ── UI bileşenleri ────────────────────────────────────────────────────
     CaptureSettings captureSettings;
@@ -362,13 +403,15 @@ int main(int argc, char* argv[]) {
 
         // CLIENT_INFO: ekran boyutu + efektif kullanıcı adı
         SystemStats stats = SystemInfo::readStats();
+        const QString startupDisplayName = SystemInfo::userDisplayName(startupUsername);
         chatHandler->setMyInfo(SystemInfo::machineId(),
                                 stats.hostname,
-                                startupUsername);
+                                startupUsername,
+                                startupDisplayName);
         okidia::ClientInfo ci;
         ci.set_hostname(stats.hostname.toStdString());
         ci.set_username(startupUsername.toStdString());
-        ci.set_display_name(SystemInfo::userDisplayName(startupUsername).toStdString());
+        ci.set_display_name(startupDisplayName.toStdString());
         ci.set_os_version(stats.osVersion.toStdString());
         ci.set_os_tag(stats.osTag.toStdString());
         ci.set_os_arch(stats.osArch.toStdString());
@@ -379,6 +422,7 @@ int main(int argc, char* argv[]) {
         ci.set_screen_height(static_cast<uint32_t>(capture->screenHeight()));
         ci.set_screens(buildScreenResolutionsString(capture));
         ci.set_agent_type(cmdHandler->agentType());
+        ci.set_assets_fingerprint(OkidiaConfig::computeAssetsFingerprint().toStdString());
         okidia::Envelope ciEnv;
         ciEnv.set_type(okidia::MessageType::CLIENT_INFO);
         ciEnv.set_payload(ci.SerializeAsString());
@@ -433,6 +477,23 @@ int main(int argc, char* argv[]) {
         Logger::info(QObject::tr("Tray: Ekran yayını sona erdi."));
     });
 
+    // Zil veya anons bitiminde duraklatılan thumbnail yakalaması devam ederken taze tam kare (keyframe) garantile
+    QObject::connect(cmdHandler, &CommandHandler::announcePlaybackStateChanged, [capture](bool playing) {
+        if (!playing && capture) {
+            capture->resetPreviousFrame();
+        }
+    });
+
+    // Canlı ses yayını ve dosyadan ses yayını (AudioPlayer) sırasında sistem sesini %100'e çıkar, bitince geri yükle
+    QObject::connect(audioPlayer, &AudioPlayer::playbackActivityChanged, [cmdHandler, capture](bool active) {
+        if (cmdHandler) {
+            cmdHandler->setPriorityAudioActive(QStringLiteral("broadcast_audio"), active);
+        }
+        if (!active && capture) {
+            capture->resetPreviousFrame();
+        }
+    });
+
     QObject::connect(localConn, &LocalConnection::envelopeReceived,
                      [startupUsername, cmdHandler, chatHandler, fileRecv,
                       tray, &broadcastRx, examHandler, audioPlayer,
@@ -448,6 +509,12 @@ int main(int argc, char* argv[]) {
         case okidia::MessageType::SCREEN_UNLOCK:
             tray->setLocked(false);
             cmdHandler->handleEnvelope(env);
+            if (capture) {
+                capture->resetPreviousFrame();
+                QTimer::singleShot(250, cmdHandler, [capture]() {
+                    capture->resetPreviousFrame();
+                });
+            }
             break;
         case okidia::MessageType::REMOTE_CONTROL_REQUEST: {
             if (broadcastRx.isBroadcasting()) {
@@ -554,6 +621,8 @@ int main(int argc, char* argv[]) {
             screenTimer->setInterval(50); // 50ms = 20 FPS yüksek hızlı akış
             if (!screenTimer->isActive()) screenTimer->start();
             cmdHandler->handleEnvelope(env);
+            capture->resetPreviousFrame();
+            sendFullFrame(localConn, capture, cmdHandler->agentType(), cmdHandler);
             break;
 
         case okidia::MessageType::SCREEN_CAPTURE:
@@ -567,6 +636,11 @@ int main(int argc, char* argv[]) {
         case okidia::MessageType::MSG_BROADCAST:
         case okidia::MessageType::APP_LIST_REQUEST:
         case okidia::MessageType::APP_CLOSE:
+        case okidia::MessageType::APP_BLOCK_BYNAME:
+        case okidia::MessageType::APP_BLOCK_BYHASH:
+        case okidia::MessageType::APP_WHITELIST_SET:
+        case okidia::MessageType::APP_BLOCK_LIST:
+        case okidia::MessageType::APP_UNBLOCK:
         case okidia::MessageType::AUDIO_UNMUTE_ONLY:
         case okidia::MessageType::AUDIO_PLAY_LOCAL:
         case okidia::MessageType::AUDIO_MUTE:
@@ -589,6 +663,7 @@ int main(int argc, char* argv[]) {
         case okidia::MessageType::CHAT_MEMBER_JOINED:
         case okidia::MessageType::CHAT_MEMBER_LEFT:
         case okidia::MessageType::CHAT_LOCK_STATE:
+        case okidia::MessageType::CHAT_MUTE_STATE:
         case okidia::MessageType::PRIVATE_CHAT_REQUEST:
         case okidia::MessageType::PRIVATE_CHAT_ACCEPT:
         case okidia::MessageType::PRIVATE_CHAT_REJECT:
@@ -643,8 +718,12 @@ int main(int argc, char* argv[]) {
         // Ses yayını
         case okidia::MessageType::AUDIO_BROADCAST_FILE:
         case okidia::MessageType::AUDIO_BROADCAST_LIVE:
+            audioPlayer->handleEnvelope(env);
+            break;
+        case okidia::MessageType::AUDIO_STOP:
         case okidia::MessageType::AUDIO_BROADCAST_STOP:
             audioPlayer->handleEnvelope(env);
+            cmdHandler->handleEnvelope(env);
             break;
 
         // Sınav
@@ -677,6 +756,7 @@ int main(int argc, char* argv[]) {
             ci.set_screen_height(static_cast<uint32_t>(capture->screenHeight()));
             ci.set_screens(buildScreenResolutionsString(capture));
             ci.set_agent_type(cmdHandler->agentType());
+            ci.set_assets_fingerprint(OkidiaConfig::computeAssetsFingerprint().toStdString());
             okidia::Envelope ciEnv;
             ciEnv.set_type(okidia::MessageType::CLIENT_INFO);
             ciEnv.set_payload(ci.SerializeAsString());
@@ -860,8 +940,16 @@ int main(int argc, char* argv[]) {
     });
 
     QObject::connect(screenTimer, &QTimer::timeout,
-                     [localConn, capture, cmdHandler]() {
+                     [localConn, capture, cmdHandler, audioPlayer]() {
         if (!localConn->isConnected()) return;
+
+        // Anons veya canlı ses yayını çalarken Wayland compositor / D-Bus / CPU darboğazının
+        // ses akışında xrun (kesiklik) yaratmasını önlemek için thumbnail yakalamayı duraklat!
+        if (!cmdHandler->isRemoteControlActive() &&
+            !cmdHandler->isScreenStreamActive() &&
+            (cmdHandler->isAnnouncePlaying() || audioPlayer->isLiveActive())) {
+            return;
+        }
 
         // Unix soket tampon belleğinde birikme varsa (servis TLS soketinin boşalmasını bekliyor demektir),
         // yeni ekran karesi yakalamayı atla. Böylece gecikme (lag) önlenir.

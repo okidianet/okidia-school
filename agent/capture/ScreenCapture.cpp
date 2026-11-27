@@ -1,5 +1,8 @@
 // agent/capture/ScreenCapture.cpp
 #include "ScreenCapture.h"
+#if !defined(Q_OS_WIN)
+#  include "WaylandPortalCapture.h"
+#endif
 #include "../../common/utils/Logger.h"
 
 #include <QScreen>
@@ -65,46 +68,58 @@ QImage ScreenCapture::captureGdi(int x, int y, int width, int height) {
         m_cachedGdiH = 0;
     }
 
-    if (!m_hScreenDC) {
-        m_hScreenDC = GetDC(NULL);
-    }
-    if (!m_hScreenDC) return {};
-
-    if (!m_hMemoryDC) {
-        m_hMemoryDC = CreateCompatibleDC(static_cast<HDC>(m_hScreenDC));
-    }
-    if (!m_hMemoryDC) return {};
-
-    if (!m_hBitmap) {
-        m_hBitmap = CreateCompatibleBitmap(static_cast<HDC>(m_hScreenDC), width, height);
-        if (m_hBitmap) {
-            m_hOldBitmap = SelectObject(static_cast<HDC>(m_hMemoryDC), static_cast<HBITMAP>(m_hBitmap));
-            m_cachedGdiW = width;
-            m_cachedGdiH = height;
+    auto tryCapture = [&]() -> QImage {
+        if (!m_hScreenDC) {
+            m_hScreenDC = GetDC(NULL);
         }
-    }
-    if (!m_hBitmap) return {};
+        if (!m_hScreenDC) return {};
 
-    QImage img(width, height, QImage::Format_ARGB32_Premultiplied);
-    bool success = false;
-
-    if (BitBlt(static_cast<HDC>(m_hMemoryDC), 0, 0, width, height, static_cast<HDC>(m_hScreenDC), x, y, SRCCOPY | CAPTUREBLT)) {
-        BITMAPINFOHEADER bi = {};
-        bi.biSize = sizeof(BITMAPINFOHEADER);
-        bi.biWidth = width;
-        bi.biHeight = -height;  // Top-down DIB
-        bi.biPlanes = 1;
-        bi.biBitCount = 32;
-        bi.biCompression = BI_RGB;
-
-        if (GetDIBits(static_cast<HDC>(m_hMemoryDC), static_cast<HBITMAP>(m_hBitmap), 0, height, img.bits(), reinterpret_cast<BITMAPINFO*>(&bi), DIB_RGB_COLORS)) {
-            success = true;
+        if (!m_hMemoryDC) {
+            m_hMemoryDC = CreateCompatibleDC(static_cast<HDC>(m_hScreenDC));
         }
-    }
+        if (!m_hMemoryDC) return {};
 
-    if (success && !img.isNull()) {
+        if (!m_hBitmap) {
+            m_hBitmap = CreateCompatibleBitmap(static_cast<HDC>(m_hScreenDC), width, height);
+            if (m_hBitmap) {
+                m_hOldBitmap = SelectObject(static_cast<HDC>(m_hMemoryDC), static_cast<HBITMAP>(m_hBitmap));
+                m_cachedGdiW = width;
+                m_cachedGdiH = height;
+            }
+        }
+        if (!m_hBitmap) return {};
+
+        QImage img(width, height, QImage::Format_ARGB32_Premultiplied);
+        if (BitBlt(static_cast<HDC>(m_hMemoryDC), 0, 0, width, height, static_cast<HDC>(m_hScreenDC), x, y, SRCCOPY | CAPTUREBLT)) {
+            BITMAPINFOHEADER bi = {};
+            bi.biSize = sizeof(BITMAPINFOHEADER);
+            bi.biWidth = width;
+            bi.biHeight = -height;  // Top-down DIB
+            bi.biPlanes = 1;
+            bi.biBitCount = 32;
+            bi.biCompression = BI_RGB;
+
+            if (GetDIBits(static_cast<HDC>(m_hMemoryDC), static_cast<HBITMAP>(m_hBitmap), 0, height, img.bits(), reinterpret_cast<BITMAPINFO*>(&bi), DIB_RGB_COLORS)) {
+                if (!img.isNull()) {
+                    return img;
+                }
+            }
+        }
+        return {};
+    };
+
+    QImage img = tryCapture();
+    if (!img.isNull()) {
         return img;
     }
+
+    // Masaüstü geçişi (Default ↔ Winlogon) veya DWM sıfırlamasında bayatlaşan HDC'yi temizle ve bir kez yeniden dene
+    releaseGdi();
+    img = tryCapture();
+    if (!img.isNull()) {
+        return img;
+    }
+    releaseGdi();
     return {};
 }
 #endif
@@ -307,6 +322,22 @@ std::vector<TileUpdate> ScreenCapture::captureDirtyTiles() {
 // Kaynak dispatcher
 // ---------------------------------------------------------------------------
 QImage ScreenCapture::captureScreen() {
+#if !defined(Q_OS_WIN)
+    if (WaylandPortalCapture::isWaylandSession()) {
+        WaylandPortalCapture::instance().ensureStarted();
+        QImage wlImg = WaylandPortalCapture::instance().latestFrame();
+        if (!wlImg.isNull()) {
+            if (wlImg.format() != QImage::Format_RGB32 &&
+                wlImg.format() != QImage::Format_ARGB32_Premultiplied &&
+                wlImg.format() != QImage::Format_ARGB32) {
+                wlImg = wlImg.convertToFormat(QImage::Format_RGB32);
+            }
+            return wlImg;
+        }
+        return {};
+    }
+#endif
+
     QImage img;
     switch (m_source.type) {
     case CaptureSource::Monitor:
@@ -347,6 +378,14 @@ void ScreenCapture::drawCursor(QImage& img) {
         for (QScreen* s : screens)
             total = total.united(s->geometry());
         localPos = globalPos - total.topLeft();
+#if defined(Q_OS_WIN)
+        if (QScreen* primary = QGuiApplication::primaryScreen()) {
+            const qreal dpr = primary->devicePixelRatio();
+            if (dpr > 1.01) {
+                localPos = QPoint(qRound(localPos.x() * dpr), qRound(localPos.y() * dpr));
+            }
+        }
+#endif
     } else if (m_source.type == CaptureSource::Monitor) {
         const auto screens = QGuiApplication::screens();
         int idx = m_source.monitorIndex;
@@ -360,6 +399,12 @@ void ScreenCapture::drawCursor(QImage& img) {
         }
         if (screen) {
             localPos = globalPos - screen->geometry().topLeft();
+#if defined(Q_OS_WIN)
+            const qreal dpr = screen->devicePixelRatio();
+            if (dpr > 1.01) {
+                localPos = QPoint(qRound(localPos.x() * dpr), qRound(localPos.y() * dpr));
+            }
+#endif
         } else {
             localPos = globalPos;
         }
@@ -370,6 +415,12 @@ void ScreenCapture::drawCursor(QImage& img) {
         QScreen* screen = QGuiApplication::primaryScreen();
         if (screen) {
             localPos = globalPos - screen->geometry().topLeft();
+#if defined(Q_OS_WIN)
+            const qreal dpr = screen->devicePixelRatio();
+            if (dpr > 1.01) {
+                localPos = QPoint(qRound(localPos.x() * dpr), qRound(localPos.y() * dpr));
+            }
+#endif
         } else {
             localPos = globalPos;
         }
@@ -415,8 +466,23 @@ QImage ScreenCapture::captureMonitor(int idx) {
     if (!screen) return {};
 
 #if defined(Q_OS_WIN)
+    const qreal dpr = screen->devicePixelRatio();
     QRect geo = screen->geometry();
-    QImage gdiImg = captureGdi(geo.x(), geo.y(), geo.width(), geo.height());
+    int physX = qRound(geo.x() * dpr);
+    int physY = qRound(geo.y() * dpr);
+    int physW = qRound(geo.width() * dpr);
+    int physH = qRound(geo.height() * dpr);
+    if (idx == 0 && screens.size() == 1) {
+        int smW = GetSystemMetrics(SM_CXSCREEN);
+        int smH = GetSystemMetrics(SM_CYSCREEN);
+        if (smW > 0 && smH > 0) {
+            physX = 0;
+            physY = 0;
+            physW = smW;
+            physH = smH;
+        }
+    }
+    QImage gdiImg = captureGdi(physX, physY, physW, physH);
     if (!gdiImg.isNull()) return gdiImg;
 #endif
 
@@ -543,12 +609,21 @@ QImage ScreenCapture::captureWindow(quint64 wid) {
 
 // ---------------------------------------------------------------------------
 QImage ScreenCapture::scaleFrame(const QImage& img) {
+    if (m_settings.maxWidth > 0 && img.width() > m_settings.maxWidth) {
+        int targetH = qMax(1, img.height() * m_settings.maxWidth / img.width());
+        Qt::TransformationMode mode = (m_settings.maxWidth > 640) ? Qt::SmoothTransformation : Qt::FastTransformation;
+        return img.scaled(m_settings.maxWidth, targetH, Qt::KeepAspectRatio, mode);
+    }
+
     if (m_settings.scalePercent >= 100) {
         return img; // %100 ölçekte hiçbir islem yapma, direkt döndür.
     }
 
     int w = qMax(img.width()  * m_settings.scalePercent / 100, 320);
     int h = qMax(img.height() * m_settings.scalePercent / 100, 240);
+    if (w >= img.width() && h >= img.height()) {
+        return img; // Düşük çözünürlüklü ekranları (Pardus hafif mod vb.) gereksiz büyütme
+    }
 
     // Remote Control gibi daha yüksek kaliteli yayınlar için SmoothTransformation kullan
     // Thumbnail için (%25) FastTransformation kullan

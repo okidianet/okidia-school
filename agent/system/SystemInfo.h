@@ -68,6 +68,15 @@ public:
     // Aktif konsol oturumunda (Session 1 / Winlogon) bağımsız süreç başlatır (Windows)
     static bool launchProcessInConsoleSession(const QString& appPath, const QStringList& args, void** outProcessHandle = nullptr);
 
+    // Aktif konsol oturumunda (winsta0\default) UIPI-üstü SYSTEM girdi yardımcısını (GUI'siz) başlatır (Windows)
+    static bool launchInputHelperInConsoleSession(const QString& appPath, const QStringList& args, void** outProcessHandle = nullptr);
+
+    // Windows SCOOBE / OOBE / Welcome Experience açılış engelleyici ekranlarını HKLM GPO ile kapatır (LocalSystem)
+    static void applyWindowsUnattendedPolicies();
+
+    // Windows SCOOBE / Welcome Experience kullanıcı bazlı HKCU anahtarlarını kapatır (aktif kullanıcı tray'i)
+    static void applyWindowsUserUnattendedPolicies();
+
     // Aktif kullanıcı oturumunda GUI süreci başlatır (Linux / Windows)
     static bool launchProcessInUserSession(const QString& username, const QString& appPath, const QStringList& args);
 

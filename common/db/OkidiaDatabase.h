@@ -95,6 +95,7 @@ public:
 
     // ── Master Devices (Fiziksel Master Bilgisayarları) ───────────────────
     bool                 upsertMasterDevice(const MasterDeviceRecord& dev);
+    bool                 removeMasterDevice(const QString& machineId, const QString& hostname = QString());
     MasterDeviceRecord   masterDeviceById(const QString& machineId) const;
     QList<MasterDeviceRecord> allMasterDevices() const;
 

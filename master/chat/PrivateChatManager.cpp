@@ -165,7 +165,13 @@ void PrivateChatManager::acceptRequest(const QString& requestId) {
     for (int i = 0; i < m_pending.size(); ++i) {
         if (m_pending[i].requestId == requestId) {
             const PendingRequest req = m_pending.takeAt(i);
-            openDirect(req.fromId, req.fromDisplay, req.fromHost, {});
+            // Aynı öğrenciden gelen diğer bekleyen istekleri de temizle (tekrarlı onay penceresi açılmasın)
+            for (int j = m_pending.size() - 1; j >= 0; --j) {
+                if (m_pending[j].fromId == req.fromId) {
+                    m_pending.removeAt(j);
+                }
+            }
+            openDirect(req.fromId, req.fromDisplay, req.fromHost, req.fromUser);
             // Kabul bildirimi
             okidia::PrivateChatAccept proto;
             proto.set_request_id(requestId.toStdString());
@@ -182,6 +188,11 @@ void PrivateChatManager::rejectRequest(const QString& requestId) {
     for (int i = 0; i < m_pending.size(); ++i) {
         if (m_pending[i].requestId == requestId) {
             const PendingRequest req = m_pending.takeAt(i);
+            for (int j = m_pending.size() - 1; j >= 0; --j) {
+                if (m_pending[j].fromId == req.fromId) {
+                    m_pending.removeAt(j);
+                }
+            }
             // Ret geçmişi güncelle
             auto& rec = m_rejectHistory[req.fromId];
             rec.count++;
@@ -201,6 +212,64 @@ void PrivateChatManager::rejectRequest(const QString& requestId) {
             return;
         }
     }
+}
+
+void PrivateChatManager::ignoreRequest(const QString& requestId) {
+    for (int i = 0; i < m_pending.size(); ++i) {
+        if (m_pending[i].requestId == requestId) {
+            const PendingRequest req = m_pending.takeAt(i);
+            for (int j = m_pending.size() - 1; j >= 0; --j) {
+                if (m_pending[j].fromId == req.fromId) {
+                    m_pending.removeAt(j);
+                }
+            }
+            QString effUser = req.fromUser;
+            if (effUser.isEmpty() && m_session) {
+                effUser = m_session->clientState(req.fromId).username;
+            }
+            ignoreUser(req.fromId, effUser);
+
+            okidia::PrivateChatReject proto;
+            proto.set_request_id(requestId.toStdString());
+            proto.set_cooldown_seconds(3600);
+            okidia::Envelope env;
+            env.set_type(okidia::MessageType::PRIVATE_CHAT_REJECT);
+            env.set_payload(proto.SerializeAsString());
+            if (m_session) m_session->sendCommand(req.fromId, env);
+
+            AuditLog::instance().recordChat({}, req.fromDisplay, tr("Özel sohbet istekleri yoksayıldı"));
+            return;
+        }
+    }
+}
+
+QString PrivateChatManager::makeUserKey(const QString& clientId, const QString& username) {
+    const QString normUser = username.trimmed().toLower();
+    return clientId + ":" + (normUser.isEmpty() ? QStringLiteral("__unknown__") : normUser);
+}
+
+void PrivateChatManager::ignoreUser(const QString& clientId, const QString& username) {
+    if (clientId.isEmpty()) return;
+    const QString key = makeUserKey(clientId, username);
+    if (!m_ignoredUsers.contains(key)) {
+        m_ignoredUsers.insert(key);
+        Logger::info(QObject::tr("PrivateChat: Kullanıcı istekleri yoksayıldı → ") + key);
+        emit ignoredUsersChanged();
+    }
+}
+
+void PrivateChatManager::unignoreUser(const QString& clientId, const QString& username) {
+    if (clientId.isEmpty()) return;
+    const QString key = makeUserKey(clientId, username);
+    if (m_ignoredUsers.remove(key)) {
+        Logger::info(QObject::tr("PrivateChat: Kullanıcı yoksayma kaldırıldı → ") + key);
+        emit ignoredUsersChanged();
+    }
+}
+
+bool PrivateChatManager::isUserIgnored(const QString& clientId, const QString& username) const {
+    if (clientId.isEmpty()) return false;
+    return m_ignoredUsers.contains(makeUserKey(clientId, username));
 }
 
 // ── Mesaj gönder ──────────────────────────────────────────────────────────────
@@ -269,12 +338,44 @@ void PrivateChatManager::onIncomingRequest(const QString& fromId,
                                             const QString& fromHost,
                                             const QString& fromUser,
                                             const QString& requestId) {
+    QString effUser = fromUser;
+    if (effUser.isEmpty() && m_session) {
+        effUser = m_session->clientState(fromId).username;
+    }
+
+    // 1. Kullanıcı yoksayılmışsa sessizce engelle
+    if (isUserIgnored(fromId, effUser)) {
+        Logger::info(QObject::tr("PrivateChat: Yoksayılan kullanıcıdan gelen istek engellendi → ") + fromId);
+        return;
+    }
+
+    // 2. Zaten açık bir özel sohbet oturumu varsa tekrar onay sorma, mevcut sekmeyi öne çıkar
+    const QString existingSessionId = sessionIdForPeer(fromId);
+    if (!existingSessionId.isEmpty()) {
+        emit sessionOpened(existingSessionId);
+        return;
+    }
+
+    // 3. Aynı kullanıcıdan halihazırda bekleyen bir istek varsa mükerrer diyalog açma
+    for (const PendingRequest& p : m_pending) {
+        if (p.fromId == fromId) {
+            return;
+        }
+    }
+
+    // 4. Ret bekleme süresi dolmadıysa sessizce engelle
+    const qint64 now = OkidiaUtils::nowSecs();
+    if (m_rejectHistory.contains(fromId) && now < cooldownEndsAt(fromId)) {
+        return;
+    }
+
     PendingRequest req;
     req.requestId   = requestId;
     req.fromId      = fromId;
     req.fromDisplay = fromDisplay;
     req.fromHost    = fromHost;
-    req.sentAt      = OkidiaUtils::nowSecs();
+    req.fromUser    = effUser;
+    req.sentAt      = now;
     m_pending.append(req);
     emit requestReceived(req);
 }

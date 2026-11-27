@@ -40,9 +40,21 @@ BrokerTransferManager::BrokerTransferManager(ClientRegistry* registry, QObject* 
     if (m_registry) {
         connect(m_registry, &ClientRegistry::clientRegistered, this, &BrokerTransferManager::onClientRegistered);
     }
+
+    refreshAssetsFingerprint();
 }
 
 BrokerTransferManager::~BrokerTransferManager() {
+    if (m_assetSyncTimer) {
+        m_assetSyncTimer->stop();
+    }
+    for (AssetSyncJob* job : m_activeAssetSyncJobs) {
+        cleanupAssetSyncJob(job);
+    }
+    m_activeAssetSyncJobs.clear();
+    m_pendingAssetSyncQueue.clear();
+    m_syncedAssetConns.clear();
+
     for (auto* transfer : m_transfers.values()) {
         if (transfer->file) {
             transfer->file->close();
@@ -1045,6 +1057,8 @@ bool BrokerTransferManager::handleAssetEnd(uint64_t seqId) {
                 QFile::ReadGroup | QFile::ReadOther);
             Logger::info(QObject::tr("Broker: Varlık dosyası merkezi depoya başarıyla kaydedildi → %1 (%2 KB)")
                          .arg(t->targetPath).arg(t->receivedSize / 1024));
+            refreshAssetsFingerprint();
+            m_syncedAssetConns.clear();
         } else {
             Logger::error(QObject::tr("Broker: Varlık dosyası atomik taşınamadı → %1").arg(t->targetPath));
         }
@@ -1054,77 +1068,195 @@ bool BrokerTransferManager::handleAssetEnd(uint64_t seqId) {
     return true;
 }
 
-void BrokerTransferManager::syncAssetsToClient(Connection* agentConn, int agentType) {
+void BrokerTransferManager::refreshAssetsFingerprint() {
+    m_brokerAssetsFingerprint = OkidiaConfig::computeAssetsFingerprint();
+}
+
+void BrokerTransferManager::cleanupAssetSyncJob(AssetSyncJob* job) {
+    if (!job) return;
+    if (job->currentFile) {
+        if (job->currentFile->isOpen()) {
+            job->currentFile->close();
+        }
+        delete job->currentFile;
+        job->currentFile = nullptr;
+    }
+    delete job;
+}
+
+void BrokerTransferManager::enqueueAssetSync(Connection* agentConn, const QString& clientId, int agentType, const QString& clientAssetsFingerprint) {
     if (!agentConn || !agentConn->isConnected()) return;
     if (agentType == 2) return; // İdari PC'ye zil varlığı gönderilmez
 
-    struct AssetPushItem {
-        QString fullPath;
-        QString targetName;
-        QString mimeType;
-    };
+    if (m_brokerAssetsFingerprint.isEmpty()) {
+        refreshAssetsFingerprint();
+        if (m_brokerAssetsFingerprint.isEmpty()) {
+            return; // Merkezi depoda gönderilecek varlık yok
+        }
+    }
 
-    QList<AssetPushItem> items = {
-        {OkidiaConfig::bellStudentAssetPath(), "bell_student.mp3", "audio/mpeg"},
-        {OkidiaConfig::bellTeacherAssetPath(), "bell_teacher.mp3", "audio/mpeg"},
-        {OkidiaConfig::bellRecessAssetPath(),  "bell_recess.mp3",  "audio/mpeg"},
-        {OkidiaConfig::schoolLogoPath(),        "school_logo.png", "image/png"}
-    };
+    // İstemci zaten birebir aynı varlıklara sahipse 0 byte transfer — anında atla
+    if (!clientAssetsFingerprint.isEmpty() && clientAssetsFingerprint == m_brokerAssetsFingerprint) {
+        m_syncedAssetConns[agentConn] = m_brokerAssetsFingerprint;
+        return;
+    }
 
-    for (const auto& item : items) {
-        if (!QFile::exists(item.fullPath) || QFileInfo(item.fullPath).size() == 0) {
+    // Aynı bağlantı üzerinde bu sürüm zaten gönderildiyse (ör. REFRESH_REQUEST kaynaklı tekrar CLIENT_INFO) atla
+    if (m_syncedAssetConns.value(agentConn) == m_brokerAssetsFingerprint) {
+        return;
+    }
+
+    // Zaten aktif veya kuyrukta ise mükerrer ekleme yapma
+    for (const AssetSyncJob* job : m_activeAssetSyncJobs) {
+        if (job && (job->conn == agentConn || (!clientId.isEmpty() && job->clientId == clientId))) {
+            return;
+        }
+    }
+    for (const QueuedAssetSync& q : m_pendingAssetSyncQueue) {
+        if (q.conn == agentConn || (!clientId.isEmpty() && q.clientId == clientId)) {
+            return;
+        }
+    }
+
+    // Bağlantı koptuğunda m_syncedAssetConns kaydını temizle
+    connect(agentConn, &Connection::disconnected, this, [this, agentConn]() {
+        m_syncedAssetConns.remove(agentConn);
+    }, Qt::UniqueConnection);
+
+    m_pendingAssetSyncQueue.append({QPointer<Connection>(agentConn), clientId});
+    processAssetSyncQueue();
+}
+
+void BrokerTransferManager::processAssetSyncQueue() {
+    while (m_activeAssetSyncJobs.size() < kMaxConcurrentAssetSync && !m_pendingAssetSyncQueue.isEmpty()) {
+        QueuedAssetSync q = m_pendingAssetSyncQueue.takeFirst();
+        if (!q.conn || !q.conn->isConnected()) {
             continue;
         }
 
-        QFile file(item.fullPath);
-        if (!file.open(QIODevice::ReadOnly)) {
+        QList<AssetPushItem> candidates = {
+            {OkidiaConfig::bellStudentAssetPath(), "bell_student.mp3", "audio/mpeg"},
+            {OkidiaConfig::bellTeacherAssetPath(), "bell_teacher.mp3", "audio/mpeg"},
+            {OkidiaConfig::bellRecessAssetPath(),  "bell_recess.mp3",  "audio/mpeg"},
+            {OkidiaConfig::schoolLogoPath(),        "school_logo.png", "image/png"}
+        };
+
+        QList<AssetPushItem> existing;
+        for (const auto& item : candidates) {
+            QFileInfo fi(item.fullPath);
+            if (fi.exists() && fi.size() > 0) {
+                existing.append(item);
+            }
+        }
+        if (existing.isEmpty()) {
             continue;
         }
 
-        uint64_t fileSize = static_cast<uint64_t>(file.size());
-        uint64_t seqId = QRandomGenerator::global()->generate64();
+        auto* job = new AssetSyncJob();
+        job->conn = q.conn;
+        job->clientId = q.clientId;
+        job->remainingItems = existing;
+        m_activeAssetSyncJobs.append(job);
+    }
 
-        // 1. FILE_TRANSFER_BEGIN
-        okidia::FileTransferBegin beginMsg;
-        beginMsg.set_filename(item.targetName.toStdString());
-        beginMsg.set_file_size(fileSize);
-        beginMsg.set_mime_type(item.mimeType.toStdString());
-        beginMsg.set_read_only(true);
-        beginMsg.set_destination("assets");
+    if (!m_activeAssetSyncJobs.isEmpty()) {
+        if (!m_assetSyncTimer) {
+            m_assetSyncTimer = new QTimer(this);
+            m_assetSyncTimer->setInterval(15); // 15ms aralıklı akış: event loop ve ağı boğmaz
+            connect(m_assetSyncTimer, &QTimer::timeout, this, &BrokerTransferManager::onAssetSyncTimerTick);
+        }
+        if (!m_assetSyncTimer->isActive()) {
+            m_assetSyncTimer->start();
+        }
+    } else if (m_assetSyncTimer && m_assetSyncTimer->isActive()) {
+        m_assetSyncTimer->stop();
+    }
+}
 
-        okidia::Envelope beginEnv;
-        beginEnv.set_type(okidia::MessageType::FILE_TRANSFER_BEGIN);
-        beginEnv.set_sequence_id(seqId);
-        beginEnv.set_payload(beginMsg.SerializeAsString());
-        agentConn->sendEnvelope(beginEnv);
+void BrokerTransferManager::onAssetSyncTimerTick() {
+    for (int i = m_activeAssetSyncJobs.size() - 1; i >= 0; --i) {
+        AssetSyncJob* job = m_activeAssetSyncJobs[i];
+        if (!job || !job->conn || !job->conn->isConnected()) {
+            m_activeAssetSyncJobs.removeAt(i);
+            cleanupAssetSyncJob(job);
+            continue;
+        }
 
-        // 2. FILE_TRANSFER_CHUNK (64 KB)
-        uint32_t chunkIdx = 0;
-        while (!file.atEnd()) {
-            QByteArray chunkData = file.read(64 * 1024);
-            bool isLast = file.atEnd();
+        // Backpressure: İstemci soket tamponu doluysa (yavaş Wi-Fi vb.) bu turu atla
+        if (job->conn->bytesToWrite() > kAssetSyncBackpressureBytes) {
+            continue;
+        }
 
+        // Aktif dosya yoksa sıradakini aç
+        while (!job->currentFile && !job->remainingItems.isEmpty()) {
+            AssetPushItem next = job->remainingItems.takeFirst();
+            auto* f = new QFile(next.fullPath);
+            if (!f->open(QIODevice::ReadOnly)) {
+                delete f;
+                continue;
+            }
+            job->currentFile = f;
+            job->currentSeqId = QRandomGenerator::global()->generate64();
+            job->chunkIdx = 0;
+            job->beginSent = false;
+
+            // 1. FILE_TRANSFER_BEGIN
+            okidia::FileTransferBegin beginMsg;
+            beginMsg.set_filename(next.targetName.toStdString());
+            beginMsg.set_file_size(static_cast<uint64_t>(f->size()));
+            beginMsg.set_mime_type(next.mimeType.toStdString());
+            beginMsg.set_read_only(true);
+            beginMsg.set_destination("assets");
+
+            okidia::Envelope beginEnv;
+            beginEnv.set_type(okidia::MessageType::FILE_TRANSFER_BEGIN);
+            beginEnv.set_sequence_id(job->currentSeqId);
+            beginEnv.set_payload(beginMsg.SerializeAsString());
+            job->conn->sendEnvelope(beginEnv);
+            job->beginSent = true;
+            break;
+        }
+
+        if (!job->currentFile) {
+            // Tüm varlıklar başarıyla tamamlandı
+            m_syncedAssetConns[job->conn.data()] = m_brokerAssetsFingerprint;
+            Logger::info(QObject::tr("Broker: Otonom varlık senkronizasyonu tamamlandı → %1").arg(job->clientId));
+            m_activeAssetSyncJobs.removeAt(i);
+            cleanupAssetSyncJob(job);
+            continue;
+        }
+
+        // 2. Tek bir 64 KB parça gönder
+        QByteArray chunkData = job->currentFile->read(64 * 1024);
+        bool isLast = job->currentFile->atEnd();
+
+        if (!chunkData.isEmpty()) {
             okidia::FileTransferChunk chunkMsg;
-            chunkMsg.set_chunk_index(chunkIdx++);
+            chunkMsg.set_chunk_index(job->chunkIdx++);
             chunkMsg.set_data(chunkData.constData(), chunkData.size());
             chunkMsg.set_is_last(isLast);
 
             okidia::Envelope chunkEnv;
             chunkEnv.set_type(okidia::MessageType::FILE_TRANSFER_CHUNK);
-            chunkEnv.set_sequence_id(seqId);
+            chunkEnv.set_sequence_id(job->currentSeqId);
             chunkEnv.set_payload(chunkMsg.SerializeAsString());
-            agentConn->sendEnvelope(chunkEnv);
+            job->conn->sendEnvelope(chunkEnv);
         }
-        file.close();
 
-        // 3. FILE_TRANSFER_END
-        okidia::Envelope endEnv;
-        endEnv.set_type(okidia::MessageType::FILE_TRANSFER_END);
-        endEnv.set_sequence_id(seqId);
-        agentConn->sendEnvelope(endEnv);
+        if (isLast) {
+            // 3. FILE_TRANSFER_END
+            okidia::Envelope endEnv;
+            endEnv.set_type(okidia::MessageType::FILE_TRANSFER_END);
+            endEnv.set_sequence_id(job->currentSeqId);
+            job->conn->sendEnvelope(endEnv);
 
-        Logger::info(QObject::tr("Broker: Otonom varlık fısıldandı → %1 (%2 KB, seqId=%3)")
-                     .arg(item.targetName).arg(fileSize / 1024).arg(seqId));
+            job->currentFile->close();
+            delete job->currentFile;
+            job->currentFile = nullptr;
+            job->beginSent = false;
+        }
     }
+
+    processAssetSyncQueue();
 }
 

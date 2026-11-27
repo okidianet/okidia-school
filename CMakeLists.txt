@@ -1,19 +1,27 @@
 cmake_minimum_required(VERSION 3.20)
 
-# Otomatik artan versiyon (Git Commit Count)
-find_package(Git QUIET)
-if(GIT_FOUND AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/.git")
-    execute_process(
-        COMMAND ${GIT_EXECUTABLE} rev-list --count HEAD
-        WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
-        OUTPUT_VARIABLE OKIDIA_COMMIT_COUNT
-        OUTPUT_STRIP_TRAILING_WHITESPACE
-    )
+# Otomatik artan versiyon: Public/ZIP paketlerinde VERSION dosyası varsa onu kullan,
+# geliştirme deposunda Git Commit Count üzerinden otomatik artır.
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/VERSION")
+    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/VERSION")
+    file(READ "${CMAKE_CURRENT_SOURCE_DIR}/VERSION" OKIDIA_VERSION_STR)
+    string(STRIP "${OKIDIA_VERSION_STR}" OKIDIA_VERSION_STR)
 else()
-    set(OKIDIA_COMMIT_COUNT "0")
+    find_package(Git QUIET)
+    if(GIT_FOUND AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/.git")
+        execute_process(
+            COMMAND ${GIT_EXECUTABLE} rev-list --count HEAD
+            WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+            OUTPUT_VARIABLE OKIDIA_COMMIT_COUNT
+            OUTPUT_STRIP_TRAILING_WHITESPACE
+        )
+    else()
+        set(OKIDIA_COMMIT_COUNT "0")
+    endif()
+    set(OKIDIA_VERSION_STR "0.1.${OKIDIA_COMMIT_COUNT}")
 endif()
 
-project(OKIDIA VERSION 0.1.${OKIDIA_COMMIT_COUNT} LANGUAGES CXX)
+project(OKIDIA VERSION ${OKIDIA_VERSION_STR} LANGUAGES CXX)
 
 # Varsayılan olarak Release modunu seç (performans ve gecikmeleri önlemek için)
 if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
@@ -45,6 +53,9 @@ find_package(Qt6 REQUIRED COMPONENTS
     Sql
     LinguistTools
 )
+if(UNIX AND NOT APPLE)
+    find_package(Qt6 QUIET COMPONENTS DBus)
+endif()
 
 # OpenSSL
 find_package(OpenSSL REQUIRED)

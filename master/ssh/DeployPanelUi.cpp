@@ -164,6 +164,9 @@ void DeployPanel::setupUi() {
     auto* actManage = clientsMenu->addAction(ThemeManager::icon(":/ui/monitor.svg"), tr("İstemci Yönetimi"));
     connect(actManage, &QAction::triggered, this, &DeployPanel::manageClientsRequested);
 
+    auto* actManageTypes = clientsMenu->addAction(ThemeManager::icon(":/ui/custom_profile.svg"), tr("İstemci Tiplerini Yönet..."));
+    connect(actManageTypes, &QAction::triggered, this, &DeployPanel::manageCustomProfilesRequested);
+
     m_btnClients->setMenu(clientsMenu);
 
     m_backBtn = new QPushButton(tr("Geri Dön"), tableGroup);

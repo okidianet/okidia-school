@@ -1,5 +1,6 @@
 // agent/system/SessionSwitchManager.cpp
 #include "SessionSwitchManager.h"
+#include "SystemInfo.h"
 #include "../../common/utils/Logger.h"
 #include <QProcess>
 #include <QDir>
@@ -33,7 +34,7 @@ QString SessionSwitchManager::getActiveGuiUser() const {
                     QString uOut = QString::fromUtf8(userProc.readAllStandardOutput()).trimmed();
                     if (uOut.startsWith("Name=")) {
                         QString user = uOut.mid(5).trimmed();
-                        if (!user.isEmpty() && user != "root" && user != "lightdm" && user != "gdm" && user != "sddm") {
+                        if (!user.isEmpty() && user != "root" && !SystemInfo::isDmUser(user)) {
                             return user;
                         }
                     }
@@ -52,7 +53,7 @@ QString SessionSwitchManager::getActiveGuiUser() const {
             QStringList parts = line.simplified().split(' ');
             if (parts.size() >= 3) {
                 QString user = parts[2];
-                if (user != "root" && user != "lightdm" && user != "gdm" && user != "sddm") {
+                if (user != "root" && !SystemInfo::isDmUser(user)) {
                     return user;
                 }
             }
@@ -159,7 +160,86 @@ bool SessionSwitchManager::switchToUserSession(const QString& username) {
 
     m_activeUser = username;
 
-    // 1. LightDM autologin dizinini oluştur ve yapılandırma dosyasını yaz
+    // Sistemdeki aktif Display Manager'ı tespit et (LightDM, GDM3/GDM, SDDM)
+    QString activeDm = QStringLiteral("lightdm");
+    {
+        QFile defDm(QStringLiteral("/etc/X11/default-display-manager"));
+        if (defDm.open(QIODevice::ReadOnly | QIODevice::Text)) {
+            const QString line = QString::fromUtf8(defDm.readAll()).trimmed();
+            if (line.contains(QStringLiteral("gdm3"))) activeDm = QStringLiteral("gdm3");
+            else if (line.contains(QStringLiteral("gdm"))) activeDm = QStringLiteral("gdm");
+            else if (line.contains(QStringLiteral("sddm"))) activeDm = QStringLiteral("sddm");
+            else if (line.contains(QStringLiteral("lightdm"))) activeDm = QStringLiteral("lightdm");
+        } else {
+            for (const QString& cand : {QStringLiteral("gdm3"), QStringLiteral("gdm"), QStringLiteral("sddm"), QStringLiteral("lightdm")}) {
+                QProcess pAct;
+                pAct.start(QStringLiteral("systemctl"), {QStringLiteral("is-active"), QStringLiteral("--quiet"), cand});
+                if (pAct.waitForFinished(500) && pAct.exitCode() == 0) {
+                    activeDm = cand;
+                    break;
+                }
+            }
+        }
+    }
+
+    Logger::info(QObject::tr("SessionSwitchManager: Aktif Display Manager tespit edildi → %1").arg(activeDm));
+
+    if (activeDm == QStringLiteral("sddm")) {
+        // ── SDDM Autologin ──
+        QDir().mkpath(QStringLiteral("/etc/sddm.conf.d"));
+        const QString sddmConf = QStringLiteral("/etc/sddm.conf.d/99-okidia-autologin.conf");
+        QFile f(sddmConf);
+        if (f.open(QIODevice::WriteOnly | QIODevice::Text)) {
+            QTextStream ts(&f);
+            ts << "[Autologin]\n";
+            ts << "User=" << username << "\n";
+            ts << "Relogin=true\n";
+            f.close();
+            Logger::info(QObject::tr("SessionSwitchManager: SDDM autologin yapılandırması yazıldı → ") + username);
+        }
+        if (!currentGuiUser.isEmpty()) {
+            forceLogoutUser(currentGuiUser);
+            QThread::msleep(400);
+        }
+        QProcess::startDetached(QStringLiteral("systemctl"), {QStringLiteral("restart"), QStringLiteral("sddm")});
+        QProcess::startDetached(QStringLiteral("bash"), {QStringLiteral("-c"), QStringLiteral("sleep 6 && rm -f /etc/sddm.conf.d/99-okidia-autologin.conf")});
+        return true;
+    }
+
+    if (activeDm == QStringLiteral("gdm3") || activeDm == QStringLiteral("gdm")) {
+        // ── GDM3 / GDM Autologin ──
+        QString gdmConfPath = QStringLiteral("/etc/gdm3/custom.conf");
+        if (!QFile::exists(gdmConfPath) && QFile::exists(QStringLiteral("/etc/gdm/custom.conf"))) {
+            gdmConfPath = QStringLiteral("/etc/gdm/custom.conf");
+        }
+        const QString gdmBakPath = gdmConfPath + QStringLiteral(".okidia.bak");
+        if (QFile::exists(gdmConfPath) && !QFile::exists(gdmBakPath)) {
+            QFile::copy(gdmConfPath, gdmBakPath);
+        }
+
+        QFile f(gdmConfPath);
+        if (f.open(QIODevice::WriteOnly | QIODevice::Text)) {
+            QTextStream ts(&f);
+            ts << "[daemon]\n";
+            ts << "AutomaticLoginEnable=True\n";
+            ts << "AutomaticLogin=" << username << "\n";
+            ts << "TimedLoginEnable=True\n";
+            ts << "TimedLogin=" << username << "\n";
+            ts << "TimedLoginDelay=0\n";
+            f.close();
+            Logger::info(QObject::tr("SessionSwitchManager: GDM autologin yapılandırması yazıldı → ") + username);
+        }
+        if (!currentGuiUser.isEmpty()) {
+            forceLogoutUser(currentGuiUser);
+            QThread::msleep(400);
+        }
+        QProcess::startDetached(QStringLiteral("systemctl"), {QStringLiteral("restart"), activeDm});
+        const QString restoreCmd = QStringLiteral("sleep 8 && if [ -f '%1' ]; then mv -f '%1' '%2'; fi").arg(gdmBakPath, gdmConfPath);
+        QProcess::startDetached(QStringLiteral("bash"), {QStringLiteral("-c"), restoreCmd});
+        return true;
+    }
+
+    // ── LightDM Autologin (Varsayılan) ──
     QDir().mkpath("/etc/lightdm/lightdm.conf.d");
     QString confPath = "/etc/lightdm/lightdm.conf.d/99-okidia-autologin.conf";
     QFile confFile(confPath);
@@ -174,22 +254,14 @@ bool SessionSwitchManager::switchToUserSession(const QString& username) {
         Logger::error(QObject::tr("SessionSwitchManager: LightDM autologin dosyası yazılamadı: ") + confPath);
     }
 
-    // 2. Önceki kullanıcının oturumunu sonlandır (varsa)
     if (!currentGuiUser.isEmpty()) {
         Logger::info(QObject::tr("SessionSwitchManager: Önceki oturum (%1) sonlandırılıyor.").arg(currentGuiUser));
         forceLogoutUser(currentGuiUser);
         QThread::msleep(400);
     }
 
-    // 3. LightDM Display Manager servisini yeniden başlat!
-    // LightDM yeniden başladığı an 99-okidia-autologin.conf dosyasını okur ve şifre sormadan
-    // doğrudan öğretmenin temiz masaüstünü açar!
     Logger::info(QObject::tr("SessionSwitchManager: Display Manager yeniden başlatılıyor (systemctl restart lightdm)..."));
     QProcess::startDetached("systemctl", {"restart", "lightdm"});
-
-    // 4. Geçici autologin dosyasını 6 saniye sonra otomatik sil.
-    // Böylece akıllı tahta ileride yeniden başlatıldığında veya kapatılıp açıldığında
-    // bu kullanıcı şifresiz kalıcı olarak OTOMATİK GİRMESİN (güvenlik açığını önle).
     QProcess::startDetached("bash", {"-c", "sleep 6 && rm -f /etc/lightdm/lightdm.conf.d/99-okidia-autologin.conf"});
 
     return true;
@@ -226,12 +298,27 @@ bool SessionSwitchManager::forceLogoutUser(const QString& username) {
 
 void SessionSwitchManager::cleanupAutologinConfig() {
 #if defined(Q_OS_LINUX)
-    const QString confPath = "/etc/lightdm/lightdm.conf.d/99-okidia-autologin.conf";
-    if (QFile::exists(confPath)) {
-        if (QFile::remove(confPath)) {
-            Logger::info(QObject::tr("SessionSwitchManager: Geçici LightDM autologin dosyası temizlendi: ") + confPath);
-        } else {
-            Logger::warning(QObject::tr("SessionSwitchManager: LightDM autologin dosyası silinemedi: ") + confPath);
+    for (const QString& confPath : {
+            QStringLiteral("/etc/lightdm/lightdm.conf.d/99-okidia-autologin.conf"),
+            QStringLiteral("/etc/sddm.conf.d/99-okidia-autologin.conf") }) {
+        if (QFile::exists(confPath)) {
+            if (QFile::remove(confPath)) {
+                Logger::info(QObject::tr("SessionSwitchManager: Geçici autologin dosyası temizlendi: ") + confPath);
+            } else {
+                Logger::warning(QObject::tr("SessionSwitchManager: Geçici autologin dosyası silinemedi: ") + confPath);
+            }
+        }
+    }
+
+    for (const QString& gdmConf : {
+            QStringLiteral("/etc/gdm3/custom.conf"),
+            QStringLiteral("/etc/gdm/custom.conf") }) {
+        const QString bak = gdmConf + QStringLiteral(".okidia.bak");
+        if (QFile::exists(bak)) {
+            QFile::remove(gdmConf);
+            if (QFile::rename(bak, gdmConf)) {
+                Logger::info(QObject::tr("SessionSwitchManager: Geçici GDM autologin yapılandırması geri yüklendi: ") + gdmConf);
+            }
         }
     }
 #endif

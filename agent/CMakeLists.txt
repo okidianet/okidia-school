@@ -9,6 +9,8 @@ add_executable(okidia-agent
     core/LocalScheduleWatchdog.cpp
     core/AgentIpcServer.cpp
     core/AgentDiscoveryCoordinator.cpp
+    input/EvdevController.cpp
+    input/InputController.cpp
     system/SystemInfo.cpp
     system/PersistentStateManager.cpp
     system/SessionSwitchManager.cpp
@@ -61,6 +63,7 @@ set(CMAKE_AUTOUIC_SEARCH_PATHS
 add_executable(okidia-tray
     main_tray.cpp
     capture/ScreenCapture.cpp
+    capture/WaylandPortalCapture.cpp
     input/InputController.cpp
     commands/CommandHandler.cpp
     commands/CommandHandlerScreen.cpp
@@ -132,6 +135,7 @@ else()
     find_package(PkgConfig REQUIRED)
     pkg_check_modules(XTST xtst)
     pkg_check_modules(XFIXES xfixes)
+    pkg_check_modules(PIPEWIRE libpipewire-0.3)
 
     if(XTST_FOUND)
         target_link_libraries(okidia-tray PRIVATE ${XTST_LIBRARIES})
@@ -143,6 +147,12 @@ else()
         target_link_libraries(okidia-tray PRIVATE ${XFIXES_LIBRARIES})
         target_include_directories(okidia-tray PRIVATE ${XFIXES_INCLUDE_DIRS})
         target_compile_definitions(okidia-tray PRIVATE HAVE_XFIXES)
+    endif()
+
+    if(PIPEWIRE_FOUND AND TARGET Qt6::DBus)
+        target_link_libraries(okidia-tray PRIVATE Qt6::DBus ${PIPEWIRE_LIBRARIES})
+        target_include_directories(okidia-tray PRIVATE ${PIPEWIRE_INCLUDE_DIRS})
+        target_compile_definitions(okidia-tray PRIVATE HAVE_PIPEWIRE)
     endif()
 endif()
 
@@ -307,6 +317,12 @@ if(UNIX)
 
     install(FILES ${CMAKE_SOURCE_DIR}/packaging/debian/okidia-agent.desktop
         DESTINATION /usr/share/applications COMPONENT okidia-agent)
+
+    install(FILES
+        ${CMAKE_SOURCE_DIR}/packaging/debian/gnome-extension/metadata.json
+        ${CMAKE_SOURCE_DIR}/packaging/debian/gnome-extension/extension.js
+        DESTINATION /usr/share/gnome-shell/extensions/okidia-kiosk@okidia.net
+        COMPONENT okidia-agent)
 
     install(FILES ${CMAKE_SOURCE_DIR}/LICENSE.txt
         DESTINATION /usr/share/doc/okidia-agent

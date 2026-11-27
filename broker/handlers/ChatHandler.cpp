@@ -5,9 +5,179 @@
 #include "../../common/db/OkidiaChatDatabase.h"
 #include "../../common/utils/OkidiaUtils.h"
 
+namespace {
+constexpr qint64 kSpamWindowSecs        = 10;
+constexpr int    kSpamMaxMsgsInWindow   = 5;
+constexpr int    kSpamIdenticalMax      = 3;
+constexpr qint64 kSpamIdenticalWindow   = 30;
+constexpr qint64 kViolationDecaySecs    = 3600; // 60 dk temiz kullanım sonrası seviye sıfırlanır
+constexpr int    kMaxMessageLength      = 500;
+constexpr int    kMaxMessageNewlines    = 5;
+constexpr qint64 kHandRaiseCooldownSecs = 30;
+
+int muteDurationForLevel(int level) {
+    if (level <= 1) return 60;   // 1 dk
+    if (level == 2) return 300;  // 5 dk
+    return 600;                  // 10 dk
+}
+} // namespace
+
 ChatHandler::ChatHandler(BrokerContext* ctx) : m_ctx(ctx) {}
 
+QString ChatHandler::makeUserKey(const QString& machineId, const QString& username) {
+    const QString normUser = username.trimmed().toLower();
+    return machineId + ":" + (normUser.isEmpty() ? QStringLiteral("__unknown__") : normUser);
+}
+
+QString ChatHandler::formatStudentDisplayName(const QString& userDisplayName,
+                                              const QString& username,
+                                              const QString& hostname,
+                                              const QString& fallbackId) {
+    const QString namePart = !userDisplayName.trimmed().isEmpty()
+        ? userDisplayName.trimmed()
+        : username.trimmed();
+    const QString hostPart = hostname.trimmed();
+    if (!namePart.isEmpty() && !hostPart.isEmpty()) {
+        return QString("%1 - %2").arg(namePart, hostPart);
+    } else if (!namePart.isEmpty()) {
+        return namePart;
+    } else if (!hostPart.isEmpty()) {
+        return hostPart;
+    }
+    return fallbackId;
+}
+
+void ChatHandler::sendMuteState(const QString& clientId,
+                                const QString& username,
+                                bool muted,
+                                qint64 mutedUntil,
+                                int durationSecs,
+                                int violationLevel,
+                                const QString& reason) {
+    okidia::ChatMuteState proto;
+    proto.set_client_id(clientId.toStdString());
+    proto.set_username(username.toStdString());
+    proto.set_muted(muted);
+    proto.set_muted_until(mutedUntil > 0 ? static_cast<uint64_t>(mutedUntil) : 0);
+    proto.set_duration_secs(durationSecs > 0 ? static_cast<uint32_t>(durationSecs) : 0);
+    proto.set_violation_level(violationLevel > 0 ? static_cast<uint32_t>(violationLevel) : 0);
+    proto.set_reason(reason.toStdString());
+
+    okidia::Envelope env;
+    env.set_type(okidia::MessageType::CHAT_MUTE_STATE);
+    env.set_target_id(clientId.toStdString());
+    env.set_payload(proto.SerializeAsString());
+
+    if (m_ctx->registry->hasClient(clientId)) {
+        m_ctx->registry->forwardToClient(clientId, env);
+    }
+    for (Connection* mConn : m_ctx->registry->masterConnections()) {
+        mConn->sendEnvelope(env);
+    }
+}
+
+void ChatHandler::syncMuteStateForClient(const QString& clientId) {
+    if (!m_ctx || !m_ctx->registry || !m_ctx->registry->hasClient(clientId)) return;
+    const RegisteredClient rc = m_ctx->registry->client(clientId);
+    const QString userKey = makeUserKey(rc.machineId.isEmpty() ? clientId : rc.machineId, rc.username);
+    const qint64 now = OkidiaUtils::nowSecs();
+
+    auto it = m_spamTrackers.find(userKey);
+    if (it != m_spamTrackers.end() && it->mutedUntil > now) {
+        sendMuteState(clientId, rc.username, true, it->mutedUntil,
+                      static_cast<int>(it->mutedUntil - now), it->violationLevel, it->muteReason);
+    } else {
+        // Farklı kullanıcı oturum açtıysa (ör. 5-A → 6-A) veya süre dolduysa kilidi temizle
+        sendMuteState(clientId, rc.username, false, 0, 0, 0, QString());
+    }
+}
+
 bool ChatHandler::handle(const okidia::Envelope& env, Connection* conn, const QString& peerId, bool* isMaster) {
+    // ── CHAT_MUTE_STATE (Master'dan manuel susturma / susturma kaldırma) ────
+    if (env.type() == okidia::MessageType::CHAT_MUTE_STATE) {
+        const bool senderIsMaster = (isMaster && *isMaster) || m_ctx->registry->isMasterConnection(conn);
+        if (!senderIsMaster) {
+            return true; // Agent kendi mute durumunu değiştiremez
+        }
+        okidia::ChatMuteState req;
+        if (!req.ParseFromString(env.payload())) return true;
+
+        const QString targetClientId = QString::fromStdString(req.client_id());
+        if (targetClientId.isEmpty()) return true;
+
+        const QString senderUserId = m_ctx->registry->authenticatedUserId(conn);
+        const QString senderRole   = m_ctx->registry->authenticatedRole(conn);
+        const AgentRecord targetRec = OkidiaDatabase::instance().agent(targetClientId);
+
+        bool authorized = (senderRole == "YM");
+        if (!authorized && senderRole == "OM" && !targetRec.classId.isEmpty()) {
+            const QStringList allowedClasses = OkidiaDatabase::instance().classIdsForUser(senderUserId);
+            if (allowedClasses.contains(targetRec.classId)) {
+                authorized = true;
+            } else {
+                const ClassRecord cr = OkidiaDatabase::instance().classById(targetRec.classId);
+                if (!cr.parentId.isEmpty() && allowedClasses.contains(cr.parentId)) {
+                    authorized = true;
+                }
+            }
+        }
+        if (!authorized) {
+            Logger::warning(QObject::tr("Broker: Yetkisiz sohbet susturma talebi engellendi → ") + senderUserId);
+            return true;
+        }
+
+        const RegisteredClient rc = m_ctx->registry->client(targetClientId);
+        const QString activeUsername = !rc.username.isEmpty()
+            ? rc.username
+            : QString::fromStdString(req.username());
+        const QString userKey = makeUserKey(targetClientId, activeUsername);
+        const qint64 now = OkidiaUtils::nowSecs();
+
+        if (req.muted()) {
+            const int dur = qBound(60, static_cast<int>(req.duration_secs() > 0 ? req.duration_secs() : 300), 3600);
+            auto& tracker = m_spamTrackers[userKey];
+            tracker.mutedUntil = now + dur;
+            tracker.muteReason = QString::fromStdString(req.reason());
+            if (tracker.muteReason.isEmpty()) {
+                tracker.muteReason = QObject::tr("Öğretmen tarafından %1 dakika sohbet kısıtlaması uygulandı.").arg(dur / 60);
+            }
+            Logger::info(QObject::tr("Broker: Manuel sohbet susturması → %1 (%2 sn)").arg(userKey).arg(dur));
+            sendMuteState(targetClientId, activeUsername, true, tracker.mutedUntil, dur, 0, tracker.muteReason);
+        } else {
+            if (m_spamTrackers.contains(userKey)) {
+                auto& tracker = m_spamTrackers[userKey];
+                tracker.mutedUntil = 0;
+                tracker.violationLevel = 0;
+                tracker.recentTimestamps.clear();
+                tracker.consecutiveSameCount = 0;
+                tracker.muteReason.clear();
+            }
+            Logger::info(QObject::tr("Broker: Sohbet susturması kaldırıldı → %1").arg(userKey));
+            sendMuteState(targetClientId, activeUsername, false, 0, 0, 0, QString());
+        }
+        return true;
+    }
+
+    // ── HAND_RAISE (Agent bekleme süresi kontrolü) ──────────────────────────
+    if (env.type() == okidia::MessageType::HAND_RAISE) {
+        const bool senderIsMaster = (isMaster && *isMaster) || m_ctx->registry->isMasterConnection(conn);
+        if (!senderIsMaster) {
+            QString senderClientId = m_ctx->registry->clientIdByConnection(conn);
+            if (!senderClientId.isEmpty()) {
+                const RegisteredClient rc = m_ctx->registry->client(senderClientId);
+                const QString userKey = makeUserKey(rc.machineId.isEmpty() ? senderClientId : rc.machineId, rc.username);
+                const qint64 now = OkidiaUtils::nowSecs();
+                const qint64 lastAt = m_lastHandRaise.value(userKey, 0);
+                if (lastAt > 0 && (now - lastAt) < kHandRaiseCooldownSecs) {
+                    Logger::warning(QObject::tr("Broker: Yardım talebi (HAND_RAISE) bekleme süresi dolmadı → %1").arg(userKey));
+                    return true; // Düşür
+                }
+                m_lastHandRaise[userKey] = now;
+            }
+        }
+        return false; // Normal yönlendirme devam etsin
+    }
+
     // ── CHAT_HISTORY_REQ ────────────────────────────────────────────────────
     if (env.type() == okidia::MessageType::CHAT_HISTORY_REQ) {
         okidia::ChatHistoryRequest req;
@@ -223,6 +393,14 @@ bool ChatHandler::handle(const okidia::Envelope& env, Connection* conn, const QS
 
         if (!senderIsMaster && (env.type() == okidia::MessageType::PRIVATE_CHAT_REQUEST ||
                                 env.type() == okidia::MessageType::PRIVATE_CHAT_MESSAGE)) {
+            // Güvenlik: İstemciden istemciye özel sohbet sunucu tarafında da kapalı
+            const QString reqTargetId = QString::fromStdString(env.target_id());
+            if (!reqTargetId.isEmpty() && !reqTargetId.startsWith("master:") && reqTargetId != "master") {
+                Logger::warning(QObject::tr("Broker: İstemciden istemciye özel sohbet engellendi → %1 → %2")
+                                .arg(senderId, reqTargetId));
+                return true;
+            }
+
             // Güvenlik: Eğer agent'ın sınıfında özel sohbet kilitliyse engelle
             const AgentRecord senderRec = OkidiaDatabase::instance().agent(m_ctx->registry->client(senderId).machineId);
             if (!senderRec.classId.isEmpty()) {
@@ -373,59 +551,163 @@ bool ChatHandler::handle(const okidia::Envelope& env, Connection* conn, const QS
             return true;
         } else {
             // Agent'tan gelen mesaj
-            QString senderClientId;
-            for (const auto& c : m_ctx->registry->allClients()) {
-                if (c.connection == conn) {
-                    senderClientId = c.clientId;
-                    break;
+            QString senderClientId = m_ctx->registry->clientIdByConnection(conn);
+            if (senderClientId.isEmpty()) {
+                for (const auto& c : m_ctx->registry->allClients()) {
+                    if (c.connection == conn) {
+                        senderClientId = c.clientId;
+                        break;
+                    }
                 }
             }
-
-            // Önce Master'a ilet
-            m_ctx->registry->forwardToMaster(senderClientId, env);
+            if (senderClientId.isEmpty()) return true;
 
             okidia::ChatMessage cm;
-            if (cm.ParseFromString(env.payload())) {
-                const QString roomId = QString::fromStdString(cm.room_id());
-                QString targetClassId;
-                if (roomId.startsWith("room_")) {
-                    targetClassId = roomId.mid(5);
-                } else {
-                    const AgentRecord senderRec = OkidiaDatabase::instance().agent(m_ctx->registry->client(senderClientId).machineId);
-                    targetClassId = senderRec.classId;
-                }
+            if (!cm.ParseFromString(env.payload())) return true;
 
-                // Güvenlik: Eğer sınıfın genel sohbeti kilitli ise mesajı engelle
-                if (!targetClassId.isEmpty()) {
-                    const ChatLockRecord lockState = OkidiaDatabase::instance().chatLockState(targetClassId);
-                    if (lockState.chatLocked) {
-                        Logger::warning(QObject::tr("Broker: Sohbet kilitli, agent mesajı engellendi → ") + senderClientId + " (" + roomId + ")");
-                        return true;
-                    }
-                }
+            const RegisteredClient senderClient = m_ctx->registry->client(senderClientId);
+            const QString machineId = senderClient.machineId.isEmpty() ? senderClientId : senderClient.machineId;
+            const AgentRecord senderRec = OkidiaDatabase::instance().agent(machineId);
 
-                // Aynı sınıftaki diğer agent'lara da ilet
-                for (const auto& c : m_ctx->registry->allClients()) {
-                    if (c.clientId != senderClientId) {
-                        const AgentRecord rec = OkidiaDatabase::instance().agent(c.machineId);
-                        if (!targetClassId.isEmpty() && rec.classId == targetClassId) {
-                            m_ctx->registry->forwardToClient(c.clientId, env);
-                        }
-                    }
-                }
-
-                (*m_ctx->chatBatch).append({
-                    OkidiaUtils::generateUuid(),
-                    roomId,
-                    senderClientId,
-                    static_cast<int>(cm.sender_role()),
-                    QString::fromStdString(cm.content()),
-                    cm.timestamp() > 0
-                        ? static_cast<qint64>(cm.timestamp())
-                        : OkidiaUtils::nowSecs(),
-                    cm.msg_type() == okidia::CHAT_MSG_SYSTEM
-                });
+            // 1. Güvenlik: Oda yetkisi doğrulaması (room_admin ve yabancı sınıflar kesin reddedilir)
+            const QString roomId = QString::fromStdString(cm.room_id());
+            if (roomId == "room_admin" || senderRec.classId.isEmpty()) {
+                Logger::warning(QObject::tr("Broker: Yetkisiz/geçersiz oda mesajı engellendi → %1 (%2)")
+                                .arg(senderClientId, roomId));
+                return true;
             }
+
+            QString targetClassId = roomId.startsWith("room_") ? roomId.mid(5) : senderRec.classId;
+            const ClassRecord senderClassRec = OkidiaDatabase::instance().classById(senderRec.classId);
+            const bool roomAllowed = (targetClassId == senderRec.classId)
+                || (!senderClassRec.parentId.isEmpty() && targetClassId == senderClassRec.parentId);
+            if (!roomAllowed) {
+                Logger::warning(QObject::tr("Broker: Yabancı sınıfa mesaj engellendi → %1 (hedef: %2, sınıf: %3)")
+                                .arg(senderClientId, targetClassId, senderRec.classId));
+                return true;
+            }
+
+            // 2. Güvenlik: Sınıf sohbeti kilitli ise Master dahil HİÇBİR YERE iletme
+            const ChatLockRecord targetLock = OkidiaDatabase::instance().chatLockState(targetClassId);
+            const ChatLockRecord ownLock = (targetClassId != senderRec.classId)
+                ? OkidiaDatabase::instance().chatLockState(senderRec.classId)
+                : ChatLockRecord{};
+            if (targetLock.chatLocked || ownLock.chatLocked) {
+                Logger::warning(QObject::tr("Broker: Sohbet kilitli, agent mesajı engellendi → ") + senderClientId + " (" + roomId + ")");
+                return true;
+            }
+
+            // 3. Kullanıcı bazlı (<machineId>:<username>) spam & susturma kontrolü
+            const qint64 now = OkidiaUtils::nowSecs();
+            const QString userKey = makeUserKey(machineId, senderClient.username);
+            auto& tracker = m_spamTrackers[userKey];
+
+            if (tracker.mutedUntil > now) {
+                Logger::warning(QObject::tr("Broker: Susturulmuş kullanıcı mesajı engellendi → %1 (%2 sn kaldı)")
+                                .arg(userKey).arg(tracker.mutedUntil - now));
+                sendMuteState(senderClientId, senderClient.username, true, tracker.mutedUntil,
+                              static_cast<int>(tracker.mutedUntil - now), tracker.violationLevel, tracker.muteReason);
+                return true;
+            }
+
+            // 4. İçerik doğrulama: boş mesaj, uzunluk (500) ve satır sayısı (5) sınırı
+            QString content = QString::fromStdString(cm.content()).trimmed();
+            if (content.isEmpty()) return true;
+            if (content.size() > kMaxMessageLength) {
+                content = content.left(kMaxMessageLength);
+            }
+            {
+                QStringList lines = content.split('\n');
+                if (lines.size() > kMaxMessageNewlines + 1) {
+                    lines = lines.mid(0, kMaxMessageNewlines + 1);
+                    content = lines.join('\n').trimmed();
+                }
+            }
+            if (content.isEmpty()) return true;
+
+            // 5. Kayan pencere + ardışık özdeş mesaj spam tespiti
+            while (!tracker.recentTimestamps.isEmpty() && (now - tracker.recentTimestamps.first()) > kSpamWindowSecs) {
+                tracker.recentTimestamps.removeFirst();
+            }
+
+            const QString normMsg = content.simplified().toLower();
+            if (!normMsg.isEmpty() && normMsg == tracker.lastNormalizedMsg && (now - tracker.lastSameMsgAt) <= kSpamIdenticalWindow) {
+                tracker.consecutiveSameCount++;
+            } else {
+                tracker.lastNormalizedMsg = normMsg;
+                tracker.consecutiveSameCount = 1;
+            }
+            tracker.lastSameMsgAt = now;
+            tracker.recentTimestamps.append(now);
+
+            const bool floodTriggered = (tracker.recentTimestamps.size() >= kSpamMaxMsgsInWindow);
+            const bool repeatTriggered = (tracker.consecutiveSameCount >= kSpamIdenticalMax);
+
+            if (floodTriggered || repeatTriggered) {
+                if (tracker.lastViolationAt > 0 && (now - tracker.lastViolationAt) >= kViolationDecaySecs) {
+                    tracker.violationLevel = 0;
+                }
+                tracker.violationLevel = qMin(tracker.violationLevel + 1, 3);
+                const int durSecs = muteDurationForLevel(tracker.violationLevel);
+                tracker.mutedUntil = now + durSecs;
+                tracker.lastViolationAt = now;
+                tracker.recentTimestamps.clear();
+                tracker.consecutiveSameCount = 0;
+                tracker.muteReason = QObject::tr("Ardışık sık mesaj nedeniyle %1 dakika sohbet kısıtlaması uygulandı.")
+                                     .arg(durSecs / 60);
+
+                Logger::warning(QObject::tr("Broker: Spam tespit edildi → %1 | Seviye: %2 | Süre: %3 dk")
+                                .arg(userKey).arg(tracker.violationLevel).arg(durSecs / 60));
+
+                sendMuteState(senderClientId, senderClient.username, true, tracker.mutedUntil,
+                              durSecs, tracker.violationLevel, tracker.muteReason);
+                return true;
+            }
+
+            // 6. Gönderen bilgisini ve rolü otoriter olarak yeniden yaz ("Görünen İsim - hostname")
+            const QString authDisplay = formatStudentDisplayName(
+                senderClient.displayName,
+                senderClient.username,
+                senderClient.hostname.isEmpty() ? senderRec.hostname : senderClient.hostname,
+                senderClientId);
+
+            cm.set_room_id(("room_" + targetClassId).toStdString());
+            cm.set_from(authDisplay.toStdString());
+            cm.set_content(content.toStdString());
+            cm.set_sender_role(okidia::SenderRole::ROLE_CLIENT);
+            cm.set_msg_type(okidia::CHAT_MSG_TEXT);
+            cm.set_timestamp(static_cast<uint64_t>(now));
+
+            okidia::Envelope outEnv = env;
+            outEnv.set_payload(cm.SerializeAsString());
+
+            // Master'a ilet
+            m_ctx->registry->forwardToMaster(senderClientId, outEnv);
+
+            // Aynı sınıftaki/gruptaki diğer agent'lara da ilet
+            for (const auto& c : m_ctx->registry->allClients()) {
+                if (c.clientId != senderClientId) {
+                    const AgentRecord rec = OkidiaDatabase::instance().agent(c.machineId);
+                    bool sameRoom = (rec.classId == targetClassId);
+                    if (!sameRoom && !rec.classId.isEmpty()) {
+                        const ClassRecord peerCr = OkidiaDatabase::instance().classById(rec.classId);
+                        sameRoom = (peerCr.parentId == targetClassId);
+                    }
+                    if (sameRoom) {
+                        m_ctx->registry->forwardToClient(c.clientId, outEnv);
+                    }
+                }
+            }
+
+            (*m_ctx->chatBatch).append({
+                OkidiaUtils::generateUuid(),
+                "room_" + targetClassId,
+                authDisplay,
+                static_cast<int>(okidia::SenderRole::ROLE_CLIENT),
+                content,
+                now,
+                false
+            });
             return true;
         }
     }

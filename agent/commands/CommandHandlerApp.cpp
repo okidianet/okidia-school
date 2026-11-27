@@ -37,6 +37,15 @@ extern "C" WINUSERAPI WINBOOL WINAPI EndTask(HWND hWnd, WINBOOL fShutDown, WINBO
 #else
 #  include <sys/types.h>
 #  include <signal.h>
+#  include "../capture/WaylandPortalCapture.h"
+#endif
+#if defined(HAVE_PIPEWIRE)
+#  include <QDBusConnection>
+#  include <QDBusInterface>
+#  include <QDBusReply>
+#  include <QJsonDocument>
+#  include <QJsonArray>
+#  include <QJsonObject>
 #endif
 #if defined(HAVE_XTST)
 #  include <X11/Xlib.h>
@@ -107,7 +116,62 @@ void CommandHandler::appListRequest() {
     WindowEnumData enumData;
     enumData.resp = &resp;
     EnumWindows(EnumWindowsProc, reinterpret_cast<LPARAM>(&enumData));
-#elif defined(HAVE_XTST)
+#else
+#if defined(HAVE_PIPEWIRE)
+    if (WaylandPortalCapture::isWaylandSession()) {
+        QDBusInterface kiosk(QStringLiteral("net.okidia.Kiosk"),
+                             QStringLiteral("/net/okidia/Kiosk"),
+                             QStringLiteral("net.okidia.Kiosk"),
+                             QDBusConnection::sessionBus());
+        if (kiosk.isValid()) {
+            QDBusReply<QString> reply = kiosk.call(QStringLiteral("ListWindows"));
+            if (reply.isValid() && !reply.value().isEmpty()) {
+                const QJsonDocument doc = QJsonDocument::fromJson(reply.value().toUtf8());
+                if (doc.isArray()) {
+                    const QJsonArray arr = doc.array();
+                    for (const QJsonValue& v : arr) {
+                        const QJsonObject obj = v.toObject();
+                        const QString title = obj.value(QStringLiteral("title")).toString().trimmed();
+                        if (title.isEmpty()) continue;
+
+                        const quint64 wid = obj.value(QStringLiteral("wid")).toVariant().toULongLong();
+                        const uint pid = obj.value(QStringLiteral("pid")).toVariant().toUInt();
+                        const QString pidStr = pid > 0 ? QString::number(pid) : QString();
+                        QString exe;
+                        if (pid > 0) {
+                            QFile comm(QStringLiteral("/proc/") + pidStr + QStringLiteral("/comm"));
+                            if (comm.open(QIODevice::ReadOnly)) {
+                                exe = QString::fromUtf8(comm.readAll()).trimmed();
+                            }
+                        }
+                        if (exe.isEmpty()) {
+                            exe = obj.value(QStringLiteral("wm_class")).toString().trimmed();
+                        }
+
+                        static const QStringList skipExe = {
+                            "okidia-agent", "okidia-tray", "plasmashell", "kwin_x11", "kwin_wayland",
+                            "gnome-shell", "xfwm4", "openbox", "marco", "mutter",
+                            "xfdesktop", "nautilus-desktop", "pcmanfm",
+                            "xfce4-panel", "lxpanel", "tint2", "polybar", "waybar",
+                            "ibus-daemon", "ibus-x11", "fcitx", "fcitx5",
+                            "picom", "compton", "dunst", "notify-osd",
+                            "okidia-master", "okidia-broker"
+                        };
+                        if (skipExe.contains(exe, Qt::CaseInsensitive)) continue;
+
+                        auto* app = resp.add_apps();
+                        app->set_name(title.toUtf8().toStdString());
+                        app->set_wid(static_cast<uint64_t>(wid));
+                        app->set_pid(pidStr.toStdString());
+                        app->set_exe(exe.toStdString());
+                    }
+                }
+            }
+        }
+    }
+#endif
+#if defined(HAVE_XTST)
+    if (resp.apps_size() == 0) {
     Display* dpy = XOpenDisplay(nullptr);
     if (dpy) {
         // _NET_CLIENT_LIST ile tüm pencereleri al
@@ -224,6 +288,8 @@ void CommandHandler::appListRequest() {
         }
         XCloseDisplay(dpy);
     }
+    }
+#endif
 #endif
 
     okidia::Envelope env;
@@ -282,7 +348,31 @@ void CommandHandler::appClose(const okidia::AppCommand& cmd) {
         Logger::info(QObject::tr("CommandHandler: Tüm pencereler sorgusuz zorla kapatılıyor..."));
 #if defined(Q_OS_WIN)
         EnumWindows(CloseAllWindowsProc, 0);
-#elif defined(HAVE_XTST)
+#else
+#if defined(HAVE_PIPEWIRE)
+        if (WaylandPortalCapture::isWaylandSession()) {
+            QDBusInterface kiosk(QStringLiteral("net.okidia.Kiosk"),
+                                 QStringLiteral("/net/okidia/Kiosk"),
+                                 QStringLiteral("net.okidia.Kiosk"),
+                                 QDBusConnection::sessionBus());
+            if (kiosk.isValid()) {
+                QDBusReply<QString> listReply = kiosk.call(QStringLiteral("ListWindows"));
+                kiosk.call(QStringLiteral("CloseAllWindows"));
+                if (listReply.isValid() && !listReply.value().isEmpty()) {
+                    const QJsonDocument doc = QJsonDocument::fromJson(listReply.value().toUtf8());
+                    if (doc.isArray()) {
+                        for (const QJsonValue& v : doc.array()) {
+                            const uint pid = v.toObject().value(QStringLiteral("pid")).toVariant().toUInt();
+                            if (pid > 1) {
+                                ::kill(static_cast<pid_t>(pid), SIGKILL);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+#endif
+#if defined(HAVE_XTST)
         Display* dpy = XOpenDisplay(nullptr);
         if (dpy) {
             Atom netClientList = XInternAtom(dpy, "_NET_CLIENT_LIST", False);
@@ -331,6 +421,7 @@ void CommandHandler::appClose(const okidia::AppCommand& cmd) {
             XCloseDisplay(dpy);
         }
 #endif
+#endif
         sendResult(true, QObject::tr("Tüm pencereler zorla kapatıldı"));
         return;
     }
@@ -357,7 +448,25 @@ void CommandHandler::appClose(const okidia::AppCommand& cmd) {
             sendResult(true, QObject::tr("Pencere zorla kapatıldı"));
             return;
         }
-#elif defined(HAVE_XTST)
+#else
+#if defined(HAVE_PIPEWIRE)
+        if (WaylandPortalCapture::isWaylandSession()) {
+            QDBusInterface kiosk(QStringLiteral("net.okidia.Kiosk"),
+                                 QStringLiteral("/net/okidia/Kiosk"),
+                                 QStringLiteral("net.okidia.Kiosk"),
+                                 QDBusConnection::sessionBus());
+            if (kiosk.isValid()) {
+                QDBusReply<uint> pidReply = kiosk.call(QStringLiteral("CloseWindow"), static_cast<qulonglong>(widVal));
+                if (pidReply.isValid() && pidReply.value() > 1) {
+                    ::kill(static_cast<pid_t>(pidReply.value()), SIGKILL);
+                    Logger::info(QObject::tr("CommandHandler: Wayland Hard Kill (SIGKILL) uygulandı → PID: %1").arg(pidReply.value()));
+                    sendResult(true, QObject::tr("Pencere zorla kapatıldı"));
+                    return;
+                }
+            }
+        }
+#endif
+#if defined(HAVE_XTST)
         Display* dpy = XOpenDisplay(nullptr);
         if (dpy) {
             Window wid = static_cast<Window>(widVal);
@@ -383,6 +492,7 @@ void CommandHandler::appClose(const okidia::AppCommand& cmd) {
         runCommand("xdotool", {"windowclose", name});
         sendResult(true, QObject::tr("Pencere kapatıldı"));
         return;
+#endif
 #endif
     }
 

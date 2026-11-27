@@ -3,6 +3,31 @@
 #include "../../common/utils/OkidiaUtils.h"
 #include "../../common/OkidiaConfig.h"
 #include "../capture/ScreenCapture.h"
+#if defined(Q_OS_WIN)
+#  ifndef WIN32_LEAN_AND_MEAN
+#    define WIN32_LEAN_AND_MEAN
+#  endif
+#  ifndef NOMINMAX
+#    define NOMINMAX
+#  endif
+#  include <windows.h>
+#  ifdef MOUSE_EVENT
+#    undef MOUSE_EVENT
+#  endif
+#  ifdef KEY_EVENT
+#    undef KEY_EVENT
+#  endif
+#else
+#  include "../capture/WaylandPortalCapture.h"
+#endif
+#if defined(HAVE_PIPEWIRE)
+#  include <QDBusConnection>
+#  include <QDBusInterface>
+#  include <QDBusReply>
+#  include <QJsonDocument>
+#  include <QJsonArray>
+#  include <QJsonObject>
+#endif
 #include "../ui/ScreenLockOverlay/ScreenLockOverlay.h"
 #include "CommandHandler.h"
 #include <QApplication>
@@ -97,11 +122,13 @@ void CommandHandler::screenLock(const okidia::ScreenLockCommand &cmd) {
   // Doğrudan kilitleniyorsa açık kalan nezaket penceresini kapat
   RecessDismissDialog::instance().dismiss();
 
+#if !defined(Q_OS_WIN)
   bool usbProtection = QSettings("okidia", "agent").value("policy/usb_protection_enabled", false).toBool()
                     || OkidiaConfig::isUsbProtectionEnabled();
   if (usbProtection) {
     QProcess::startDetached("sync", {});
   }
+#endif
 
   QString msg = QString::fromStdString(cmd.message());
 
@@ -269,7 +296,8 @@ void CommandHandler::handleScreenConfig(const okidia::ScreenConfig &cmd) {
         settings.scalePercent = 10;
     }
   } else {
-    // Genişlik belirtilmemişse varsayılan %25 thumbnail ölçeği
+    // Genişlik belirtilmemişse eski uzak kontrol maxWidth değerini temizle ve varsayılan %25 thumbnail ölçeğine dön
+    settings.maxWidth = 0;
     settings.scalePercent = 25;
   }
 
@@ -304,8 +332,66 @@ void CommandHandler::screenInfoRequest() {
     mi->set_is_primary(m.isPrimary);
   }
 
-  // Aktif pencereler (X11)
+  // Aktif pencereler (Windows, Wayland GNOME Kiosk veya X11)
+#if defined(Q_OS_WIN)
+  struct ScreenWinEnumCtx {
+    okidia::ScreenInfoResponse* resp;
+  };
+  ScreenWinEnumCtx enumCtx{ &resp };
+  EnumWindows([](HWND hwnd, LPARAM lParam) -> BOOL {
+    if (!IsWindowVisible(hwnd)) return TRUE;
+    if (GetWindowLongW(hwnd, GWL_EXSTYLE) & WS_EX_TOOLWINDOW) return TRUE;
+    wchar_t titleBuf[512] = {0};
+    if (GetWindowTextW(hwnd, titleBuf, 512) <= 0) return TRUE;
+    QString title = QString::fromWCharArray(titleBuf).trimmed();
+    if (title.isEmpty()) return TRUE;
+    RECT rc = {};
+    if (!GetWindowRect(hwnd, &rc)) return TRUE;
+    int w = rc.right - rc.left;
+    int h = rc.bottom - rc.top;
+    if (w <= 0 || h <= 0) return TRUE;
+    auto* ctx = reinterpret_cast<ScreenWinEnumCtx*>(lParam);
+    auto* win = ctx->resp->add_windows();
+    win->set_title(title.toUtf8().toStdString());
+    win->set_wid(reinterpret_cast<uint64_t>(hwnd));
+    win->set_x(static_cast<uint32_t>(qMax(0L, rc.left)));
+    win->set_y(static_cast<uint32_t>(qMax(0L, rc.top)));
+    win->set_width(static_cast<uint32_t>(w));
+    win->set_height(static_cast<uint32_t>(h));
+    return TRUE;
+  }, reinterpret_cast<LPARAM>(&enumCtx));
+#endif
+#if defined(HAVE_PIPEWIRE)
+  if (WaylandPortalCapture::isWaylandSession()) {
+    QDBusInterface kiosk(QStringLiteral("net.okidia.Kiosk"),
+                         QStringLiteral("/net/okidia/Kiosk"),
+                         QStringLiteral("net.okidia.Kiosk"),
+                         QDBusConnection::sessionBus());
+    if (kiosk.isValid()) {
+      QDBusReply<QString> reply = kiosk.call(QStringLiteral("ListWindows"));
+      if (reply.isValid() && !reply.value().isEmpty()) {
+        const QJsonDocument doc = QJsonDocument::fromJson(reply.value().toUtf8());
+        if (doc.isArray()) {
+          const QJsonArray arr = doc.array();
+          for (const QJsonValue &v : arr) {
+            const QJsonObject obj = v.toObject();
+            const QString title = obj.value(QStringLiteral("title")).toString().trimmed();
+            if (title.isEmpty()) continue;
+            auto *w = resp.add_windows();
+            w->set_title(title.toUtf8().toStdString());
+            w->set_wid(static_cast<uint64_t>(obj.value(QStringLiteral("wid")).toVariant().toULongLong()));
+            w->set_x(static_cast<uint32_t>(qMax(0, obj.value(QStringLiteral("x")).toInt())));
+            w->set_y(static_cast<uint32_t>(qMax(0, obj.value(QStringLiteral("y")).toInt())));
+            w->set_width(static_cast<uint32_t>(qMax(0, obj.value(QStringLiteral("w")).toInt())));
+            w->set_height(static_cast<uint32_t>(qMax(0, obj.value(QStringLiteral("h")).toInt())));
+          }
+        }
+      }
+    }
+  }
+#endif
 #ifdef HAVE_XTST
+  if (resp.windows_size() == 0) {
   Display *dpy = XOpenDisplay(nullptr);
   if (dpy) {
     Window root = DefaultRootWindow(dpy);
@@ -377,6 +463,7 @@ void CommandHandler::screenInfoRequest() {
     }
     XCloseDisplay(dpy);
   }
+  }
 #endif
 
   okidia::Envelope env;
@@ -389,17 +476,37 @@ void CommandHandler::screenInfoRequest() {
 void CommandHandler::screenCapture() {
   Logger::info(QObject::tr("CommandHandler: Ekran görüntüsü alınıyor"));
 
-  QScreen *screen = QApplication::primaryScreen();
-  if (!screen) {
-    sendResult(false, QObject::tr("Ekran bulunamadı"));
+  QImage img;
+#if defined(Q_OS_WIN)
+  if (m_capture) {
+    img = m_capture->captureScreen();
+  }
+#else
+  if (WaylandPortalCapture::isWaylandSession()) {
+    WaylandPortalCapture::instance().ensureStarted();
+    img = WaylandPortalCapture::instance().latestFrame();
+  }
+#endif
+
+  if (img.isNull()) {
+    QScreen *screen = QApplication::primaryScreen();
+    if (!screen) {
+      sendResult(false, QObject::tr("Ekran bulunamadı"));
+      return;
+    }
+    QPixmap screenshot = screen->grabWindow(0);
+    img = screenshot.toImage();
+  }
+
+  if (img.isNull()) {
+    sendResult(false, QObject::tr("Ekran görüntüsü alınamadı"));
     return;
   }
 
-  QPixmap screenshot = screen->grabWindow(0);
   QByteArray pngData;
   QBuffer buffer(&pngData);
   buffer.open(QIODevice::WriteOnly);
-  screenshot.save(&buffer, "PNG");
+  img.save(&buffer, "PNG");
   buffer.close();
 
   if (pngData.isEmpty()) {
@@ -413,8 +520,8 @@ void CommandHandler::screenCapture() {
   okidia::ScreenCaptureResult result;
   result.set_png_data(pngData.toStdString());
   result.set_timestamp(OkidiaUtils::nowSecsU64());
-  result.set_width(static_cast<uint32_t>(screenshot.width()));
-  result.set_height(static_cast<uint32_t>(screenshot.height()));
+  result.set_width(static_cast<uint32_t>(img.width()));
+  result.set_height(static_cast<uint32_t>(img.height()));
 
   okidia::Envelope env;
   env.set_type(okidia::MessageType::SCREEN_CAPTURE_RESULT);

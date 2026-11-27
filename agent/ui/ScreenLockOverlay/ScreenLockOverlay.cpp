@@ -1,5 +1,8 @@
 #include "ScreenLockOverlay.h"
 #include "ui_ScreenLockOverlay.h"
+#if !defined(Q_OS_WIN)
+#  include "../../capture/WaylandPortalCapture.h"
+#endif
 
 #include <QApplication>
 #include <QScreen>
@@ -55,7 +58,7 @@ ScreenLockOverlay::ScreenLockOverlay(QWidget* parent)
             | Qt::FramelessWindowHint
             | Qt::WindowStaysOnTopHint
 #if !defined(Q_OS_WIN)
-            | Qt::X11BypassWindowManagerHint
+            | (WaylandPortalCapture::isWaylandSession() ? Qt::WindowFlags() : Qt::WindowFlags(Qt::X11BypassWindowManagerHint))
 #endif
             )
     , ui(new Ui::ScreenLockOverlay) {
@@ -78,15 +81,21 @@ void ScreenLockOverlay::showLock(const QString& message) {
     if (m_locked) return;
     m_locked = true;
 
+    const QString effectiveMsg = message.isEmpty()
+                    ? tr("Lütfen öğretmeninizi dinleyin.")
+                    : message;
+
 #if defined(Q_OS_WIN)
     if (!s_hScreenLockHook) {
         s_hScreenLockHook = SetWindowsHookExW(WH_KEYBOARD_LL, ScreenLockKeyboardProc, GetModuleHandle(NULL), 0);
     }
+    // Kilitliyken sistem uykusunu ve ekran koruyucuyu bastır
+    SetThreadExecutionState(ES_CONTINUOUS | ES_DISPLAY_REQUIRED | ES_SYSTEM_REQUIRED);
+#else
+    WaylandPortalCapture::setGnomeLockOverlay(true, ui->titleLabel->text(), effectiveMsg);
 #endif
 
-    coverAllScreens(message.isEmpty()
-                    ? tr("Lütfen öğretmeninizi dinleyin.")
-                    : message);
+    coverAllScreens(effectiveMsg);
 }
 
 void ScreenLockOverlay::hideLock() {
@@ -99,7 +108,9 @@ void ScreenLockOverlay::hideLock() {
         UnhookWindowsHookEx(s_hScreenLockHook);
         s_hScreenLockHook = nullptr;
     }
+    SetThreadExecutionState(ES_CONTINUOUS);
 #else
+    WaylandPortalCapture::setGnomeLockOverlay(false);
     // Ekran koruyucuları ve light-locker'ı tekrar devam ettir (SIGCONT)
     QProcess::startDetached("pkill", {"-CONT", "light-locker"});
     QProcess::startDetached("pkill", {"-CONT", "xfce4-screensaver"});
@@ -134,10 +145,17 @@ void ScreenLockOverlay::hideLock() {
 }
 
 void ScreenLockOverlay::setMessage(const QString& message) {
-    m_currentMessage = message;
-    ui->messageLabel->setText(message);
+    m_currentMessage = message.isEmpty()
+                       ? tr("Lütfen öğretmeninizi dinleyin.")
+                       : message;
+    ui->messageLabel->setText(m_currentMessage);
     for (ScreenLockOverlay* w : m_extraScreens)
-        w->ui->messageLabel->setText(message);
+        w->ui->messageLabel->setText(m_currentMessage);
+#if !defined(Q_OS_WIN)
+    if (m_locked) {
+        WaylandPortalCapture::setGnomeLockOverlay(true, ui->titleLabel->text(), m_currentMessage);
+    }
+#endif
 }
 
 // ---------------------------------------------------------------------------
@@ -217,6 +235,10 @@ void ScreenLockOverlay::coverScreen(int screenIndex,
     showFullScreen();
     raise();
     activateWindow();
+#if defined(Q_OS_WIN)
+    SetWindowPos(reinterpret_cast<HWND>(winId()), HWND_TOPMOST, 0, 0, 0, 0,
+                 SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW);
+#endif
 }
 
 void ScreenLockOverlay::onScreenAdded(QScreen* screen) {
@@ -235,6 +257,7 @@ void ScreenLockOverlay::updateScreens() {
     if (!m_locked) return;
 
 #if !defined(Q_OS_WIN)
+    WaylandPortalCapture::setGnomeLockOverlay(true, ui->titleLabel->text(), m_currentMessage);
     QProcess::startDetached("xset", {"s", "reset"});
 #endif
 
@@ -254,6 +277,10 @@ void ScreenLockOverlay::updateScreens() {
         raise();
         activateWindow();
     }
+#if defined(Q_OS_WIN)
+    SetWindowPos(reinterpret_cast<HWND>(winId()), HWND_TOPMOST, 0, 0, 0, 0,
+                 SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+#endif
 
     // 2. Ek ekranları denetle (eklenen/çıkarılan varsa listeyi senkronize et)
     int requiredExtra = screens.size() - 1;

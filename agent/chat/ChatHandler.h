@@ -17,7 +17,7 @@ public:
 
     void setConnection(LocalConnection* conn) { m_conn = conn; }
     void setMyInfo(const QString& clientId, const QString& hostname,
-                   const QString& username);
+                   const QString& username, const QString& displayName = QString());
 
     void handleEnvelope(const okidia::Envelope& envelope);
     void showChatWindow(bool allowEmpty = false);
@@ -49,6 +49,7 @@ private:
     void handlePrivateMessage(const okidia::Envelope& env);
     void handlePrivateClose  (const okidia::Envelope& env);
     void handleChatLockState (const okidia::Envelope& env);
+    void handleChatMuteState (const okidia::Envelope& env);
     void handleChatWindowState(const okidia::Envelope& env);
     void sendWindowState(bool open);
 
@@ -60,7 +61,10 @@ private:
     QString m_myUsername;
     QString m_myDisplay;
 
-    bool m_windowOpen = false;
+    bool   m_windowOpen = false;
+    qint64 m_mutedUntil = 0;
+    QString m_muteReason;
+    qint64 m_lastHandRaiseAt = 0;
 
     struct CachedRoom {
         AgentRoomInfo          info;

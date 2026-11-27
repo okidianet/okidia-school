@@ -1,6 +1,36 @@
 // agent/broadcast/ScreenBroadcastReceiver.cpp
 #include "ScreenBroadcastReceiver.h"
 #include "../../common/utils/Logger.h"
+#if defined(Q_OS_WIN)
+#  ifndef WIN32_LEAN_AND_MEAN
+#    define WIN32_LEAN_AND_MEAN
+#  endif
+#  ifndef NOMINMAX
+#    define NOMINMAX
+#  endif
+#  include <windows.h>
+#  ifdef MOUSE_EVENT
+#    undef MOUSE_EVENT
+#  endif
+#  ifdef KEY_EVENT
+#    undef KEY_EVENT
+#  endif
+
+static HHOOK s_hBroadcastKbHook = nullptr;
+static LRESULT CALLBACK BroadcastKeyboardProc(int nCode, WPARAM wParam, LPARAM lParam) {
+    if (nCode >= 0) {
+        auto* p = reinterpret_cast<KBDLLHOOKSTRUCT*>(lParam);
+        bool isAlt = (p->flags & LLKHF_ALTDOWN) != 0;
+        if (p->vkCode == VK_LWIN || p->vkCode == VK_RWIN) return 1;
+        if (isAlt && (p->vkCode == VK_TAB || p->vkCode == VK_ESCAPE || p->vkCode == VK_F4)) return 1;
+        if ((GetAsyncKeyState(VK_CONTROL) & 0x8000) && p->vkCode == VK_ESCAPE) return 1;
+        if ((GetAsyncKeyState(VK_CONTROL) & 0x8000) && (GetAsyncKeyState(VK_SHIFT) & 0x8000) && p->vkCode == VK_ESCAPE) return 1;
+    }
+    return CallNextHookEx(s_hBroadcastKbHook, nCode, wParam, lParam);
+}
+#else
+#  include "../capture/WaylandPortalCapture.h"
+#endif
 
 #include <QKeyEvent>
 #include <QCloseEvent>
@@ -21,7 +51,10 @@ ScreenBroadcastReceiver::ScreenBroadcastReceiver(QWidget* parent)
               Qt::Window
             | Qt::FramelessWindowHint
             | Qt::WindowStaysOnTopHint
-            | Qt::X11BypassWindowManagerHint) {
+#if !defined(Q_OS_WIN)
+            | (WaylandPortalCapture::isWaylandSession() ? Qt::WindowFlags() : Qt::WindowFlags(Qt::X11BypassWindowManagerHint))
+#endif
+            ) {
     setAttribute(Qt::WA_DeleteOnClose, false);
     setStyleSheet("background: #000000;");
     setFocusPolicy(Qt::StrongFocus);
@@ -51,12 +84,24 @@ void ScreenBroadcastReceiver::handleEnvelope(
 void ScreenBroadcastReceiver::handleBegin() {
     m_isBroadcasting = true;
     Logger::info(QObject::tr("ScreenBroadcastReceiver: Ekran yayını başladı"));
+#if defined(Q_OS_WIN)
+    if (!s_hBroadcastKbHook) {
+        s_hBroadcastKbHook = SetWindowsHookExW(WH_KEYBOARD_LL, BroadcastKeyboardProc, GetModuleHandle(NULL), 0);
+    }
+    SetThreadExecutionState(ES_CONTINUOUS | ES_DISPLAY_REQUIRED | ES_SYSTEM_REQUIRED);
+#else
+    WaylandPortalCapture::setGnomeLockdown(true);
+#endif
     QRect geom = QApplication::primaryScreen()->geometry();
     setGeometry(geom);
     showFullScreen();
     raise();
     activateWindow();
     setFocus();
+#if defined(Q_OS_WIN)
+    SetWindowPos(reinterpret_cast<HWND>(winId()), HWND_TOPMOST, 0, 0, 0, 0,
+                 SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW);
+#endif
     emit broadcastStarted();
 }
 
@@ -90,6 +135,15 @@ void ScreenBroadcastReceiver::handleEnd() {
     if (!m_isBroadcasting && isHidden()) return;
     m_isBroadcasting = false;
     Logger::info(QObject::tr("ScreenBroadcastReceiver: Ekran yayını bitti"));
+#if defined(Q_OS_WIN)
+    if (s_hBroadcastKbHook) {
+        UnhookWindowsHookEx(s_hBroadcastKbHook);
+        s_hBroadcastKbHook = nullptr;
+    }
+    SetThreadExecutionState(ES_CONTINUOUS);
+#else
+    WaylandPortalCapture::setGnomeLockdown(false);
+#endif
     m_frame = QPixmap();
     m_pendingJpegData.clear();
     m_renderPending = false;

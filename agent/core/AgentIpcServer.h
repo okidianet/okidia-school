@@ -18,6 +18,8 @@ public:
 
     void sendToActive(const okidia::Envelope& env);
     void broadcast(const okidia::Envelope& env);
+    bool hasInputHelper() const;
+    bool sendToInputHelper(const okidia::Envelope& env);
 
     // Active remote control caching
     void setRemoteControlActive(bool active) { m_remoteControlActive = active; }
@@ -36,6 +38,9 @@ public:
     void setLastExamStartEnv(const okidia::Envelope& env) { m_lastExamStartEnv = env; }
     void clearExamEnv() { m_lastExamStartEnv.Clear(); }
 
+    // Agent type caching (Yeni bağlanan DM/kullanıcı tray'ine tip bilgisini anında senkronize etmek için)
+    void setLastAgentTypeEnv(const okidia::Envelope& env) { m_lastAgentTypeEnv = env; }
+
     void replayActiveStateToTray(LocalConnection* conn);
 
     void setExpectedIpcToken(const QString& token) { m_expectedIpcToken = token; }
@@ -47,6 +52,7 @@ public:
 
 signals:
     void agentTypeUpdated(int newType);
+    void activeTrayReady(LocalConnection* conn, const QString& username);
 
 private:
     void handleEnvelopeFromTray(LocalConnection* sender, const okidia::Envelope& env);
@@ -57,6 +63,7 @@ private:
     QString          m_expectedIpcToken;
     QSet<LocalConnection*> m_authenticatedClients;
     QSet<LocalConnection*> m_replayedClients;
+    LocalConnection*       m_inputHelperConn = nullptr;
 
     bool             m_remoteControlActive = false;
     okidia::Envelope m_lastTakeControlEnv;
@@ -64,6 +71,7 @@ private:
     okidia::Envelope m_lastScreenSelectEnv;
     okidia::Envelope m_lastBroadcastBeginEnv;
     okidia::Envelope m_lastExamStartEnv;
+    okidia::Envelope m_lastAgentTypeEnv;
 
     // Tray'den gelen son ekran boyutları (fallback SCREEN_INFO_RESPONSE için)
     uint32_t         m_lastKnownScreenW = 0;

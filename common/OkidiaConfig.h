@@ -4,7 +4,9 @@
 #include <QString>
 #include <QSettings>
 #include <QFile>
+#include <QFileInfo>
 #include <QDir>
+#include <QCryptographicHash>
 #include <QStandardPaths>
 #include <QCoreApplication>
 #include <QJsonDocument>
@@ -387,6 +389,39 @@ public:
 
     static QString bellRecessAssetPath() {
         return assetsDir() + "/bell_recess.mp3";
+    }
+
+    // Merkezi okul varlıklarının (ziller + logo) tekil SHA-256 parmak izi.
+    // Tüm dosyalar eksikse boş string döner; herhangi bir dosya değiştiğinde parmak izi değişir.
+    static QString computeAssetsFingerprint() {
+        const QStringList paths = {
+            bellStudentAssetPath(),
+            bellTeacherAssetPath(),
+            bellRecessAssetPath(),
+            schoolLogoPath()
+        };
+        QCryptographicHash overall(QCryptographicHash::Sha256);
+        bool anyExists = false;
+        for (const QString& p : paths) {
+            QFile f(p);
+            const QString fname = QFileInfo(p).fileName();
+            if (f.exists() && f.size() > 0 && f.open(QIODevice::ReadOnly)) {
+                anyExists = true;
+                overall.addData(fname.toUtf8());
+                overall.addData(":");
+                overall.addData(QByteArray::number(f.size()));
+                overall.addData(":");
+                QCryptographicHash fileHash(QCryptographicHash::Sha256);
+                fileHash.addData(&f);
+                overall.addData(fileHash.result().toHex());
+                overall.addData(";");
+            } else {
+                overall.addData(fname.toUtf8());
+                overall.addData(":MISSING;");
+            }
+        }
+        if (!anyExists) return QString();
+        return QString::fromLatin1(overall.result().toHex().left(32));
     }
 
     // ── Ders & Zil Saatleri Modeli ──────────────────────────────────────────

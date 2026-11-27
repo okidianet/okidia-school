@@ -957,8 +957,26 @@ static int runBrokerApp(int argc, char* argv[]) {
         Logger::info(QObject::tr("Broker: Yeni bağlantı ← ") + conn->peerAddress());
         bool* isMaster = new bool(false);
 
+        // Bağlantı kimliğini (X.509 CN) ve DB geçerliliğini bağlantı başında YALNIZCA BİR KEZ çözümle.
+        // Her pakette sertifika parse etme ve 3 senkron SQLite sorgusu çalıştırma darboğazını ortadan kaldırır.
+        QString cachedPeerId;
+        QSslCertificate peerCert = conn->sslSocket() ? conn->sslSocket()->peerCertificate() : QSslCertificate();
+        if (!peerCert.isNull()) {
+            cachedPeerId = peerCert.subjectInfo(QSslCertificate::CommonName).join("");
+        }
+        if (!cachedPeerId.isEmpty() && !cachedPeerId.startsWith("okidia-master-")) {
+            UserRecord u = OkidiaDatabase::instance().userById(cachedPeerId);
+            if (u.id.isEmpty() || !u.isActive) {
+                AgentRecord agent = OkidiaDatabase::instance().agent(cachedPeerId);
+                if (agent.machineId.isEmpty()) {
+                    Logger::warning(QObject::tr("Broker: Kayıtlı olmayan veya pasif kullanıcı/agent sertifikası tespit edildi, anonim muamelesi yapılıyor: ") + cachedPeerId);
+                    cachedPeerId.clear();
+                }
+            }
+        }
+
         QObject::connect(conn, &Connection::envelopeReceived,
-                         conn, [conn, ctx, messageHandler, isMaster]
+                         conn, [conn, ctx, messageHandler, isMaster, cachedPeerId]
                          (const okidia::Envelope& env) {
 
             // Yüksek frekanslı periyodik veri mesajlarını (Heartbeat, ekran kareleri, telemetri)
@@ -980,12 +998,8 @@ static int runBrokerApp(int argc, char* argv[]) {
                              + QObject::tr(" from=") + conn->peerAddress());
             }
 
-            // ── Güvenlik Kontrolü: Kara Liste (Revocation) ──────────────────────
-            QString peerId;
-            QSslCertificate peerCert = conn->sslSocket() ? conn->sslSocket()->peerCertificate() : QSslCertificate();
-            if (!peerCert.isNull()) {
-                peerId = peerCert.subjectInfo(QSslCertificate::CommonName).join("");
-            }
+            // ── Güvenlik Kontrolü: Kara Liste (O(1) bellek içi kontrol) ────────
+            const QString& peerId = cachedPeerId;
 
             if (!peerId.isEmpty() && ctx->registry->isRevoked(peerId)) {
                 AgentRecord blacklisted = OkidiaDatabase::instance().blacklistedAgent(peerId);
@@ -1009,18 +1023,6 @@ static int runBrokerApp(int argc, char* argv[]) {
                     conn->disconnect();
                 }
                 return;
-            }
-
-            // Degrade invalid or inactive master certificates to anonymous instead of hard-disconnecting
-            if (!peerId.isEmpty() && !peerId.startsWith("okidia-master-")) {
-                UserRecord u = OkidiaDatabase::instance().userById(peerId);
-                if (u.id.isEmpty() || !u.isActive) {
-                    AgentRecord agent = OkidiaDatabase::instance().agent(peerId);
-                    if (agent.machineId.isEmpty()) {
-                        Logger::warning(QObject::tr("Broker: Kayıtlı olmayan veya pasif kullanıcı/agent sertifikası tespit edildi, anonim muamelesi yapılıyor: ") + peerId);
-                        peerId = "";
-                    }
-                }
             }
 
             if (ctx->enrollmentManager->process(conn, env, peerId)) {

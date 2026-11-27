@@ -56,6 +56,7 @@ signals:
     void logMessage(const QString& msg);
     void discoveryPanelRequested();
     void manageClientsRequested();
+    void manageCustomProfilesRequested();
 
 private slots:
     // Ağ tarama

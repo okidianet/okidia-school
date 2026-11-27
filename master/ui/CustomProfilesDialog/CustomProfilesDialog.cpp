@@ -52,7 +52,7 @@ CustomProfilesDialog::CustomProfilesDialog(SessionManager* session, QWidget* par
 }
 
 void CustomProfilesDialog::setupUi() {
-    setWindowTitle(tr("Özel İstemci Tipleri Yönetimi"));
+    setWindowTitle(tr("İstemci Tiplerini Yönet"));
     setWindowIcon(ThemeManager::icon(":/ui/custom_profile.svg"));
     resize(700, 480);
 

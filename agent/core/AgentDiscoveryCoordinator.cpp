@@ -96,7 +96,13 @@ void AgentDiscoveryCoordinator::start() {
         
         (*failedReconnects)++;
         if (m_configuredBrokerIp.isEmpty()) {
-            Logger::info(QObject::tr("Agent: Bağlantı koptu, mDNS ağ taraması anında yenileniyor..."));
+            if (*failedReconnects >= 2 && m_tls->isAnonymous()) {
+                Logger::info(QObject::tr("Agent: Ardışık bağlantı hatası (%1), hedef IP kilidi sıfırlanıp mDNS/DNS fallback yenileniyor...").arg(*failedReconnects));
+                *failedReconnects = 0;
+                m_tls->clearTargetHost();
+            } else {
+                Logger::info(QObject::tr("Agent: Bağlantı koptu, mDNS ağ taraması anında yenileniyor..."));
+            }
             DiscoveryService(m_mdns).restartDiscovery();
             startFallbackTimer();
         }

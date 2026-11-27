@@ -23,6 +23,9 @@ apt-get install -y \
     qt6-base-dev \
     qt6-multimedia-dev \
     qt6-tools-dev \
+    qt6-wayland \
+    libqt6svg6 \
+    qt6-translations-l10n \
     libssl-dev \
     libprotobuf-dev \
     protobuf-compiler \
@@ -30,7 +33,10 @@ apt-get install -y \
     libsystemd-dev \
     libavahi-client-dev \
     libxtst-dev \
+    libxfixes-dev \
     libx11-dev \
+    libpipewire-0.3-dev \
+    xdg-desktop-portal \
     libsqlite3-dev
 
 # JPEG dev paketi farklı dağıtımlarda farklı isimlerde olabiliyor (libjpeg-turbo8-dev, libjpeg-dev, vb.)

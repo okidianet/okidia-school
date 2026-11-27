@@ -50,11 +50,17 @@ public:
     bool isRemoteControlActive() const { return m_remoteControlActive; }
     bool isScreenStreamActive() const { return m_screenStreamActive; }
     void setScreenStreamActive(bool active) { m_screenStreamActive = active; }
+    bool isAnnouncePlaying() const { return m_announcePlaying; }
 
     void screenLock(const okidia::ScreenLockCommand& cmd);
     void screenUnlock();
     void inputLock();
     void inputUnlock();
+    void audioStopAll(const QString& announceId = QString());
+    void setPriorityAudioActive(const QString& sourceKey, bool active);
+
+signals:
+    void announcePlaybackStateChanged(bool playing);
 
 private:
     uint32_t         m_agentType  = 1;
@@ -130,12 +136,21 @@ private:
         QString path;
         int repeat;
         bool isBell = false;
+        QString announceId;
     };
     QQueue<PendingAnnounce> m_announceQueue;
     bool m_announcePlaying = false;
     bool m_currentPlayingIsBell = false;
+    QString m_currentAnnounceId;
+    QSet<QString> m_cancelledAnnounceIds;
     QPointer<LocalPlaylistPlayer> m_activePlayer;
     void playNextAnnounce();
+
+    // Zil ve anons süresince %100 ses yükseltme ve eski ayarı geri yükleme
+    QSet<QString> m_priorityAudioSources;
+    bool          m_priorityBoostActive = false;
+    int           m_boostSavedVolume    = -1;
+    bool          m_boostSavedMuted     = false;
 
     // Uygulama engelleme & Watchdog
     AgentTray*   m_tray = nullptr;

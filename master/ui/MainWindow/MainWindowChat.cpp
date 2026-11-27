@@ -31,9 +31,15 @@ void MainWindow::onChatMessageReceived(const QString& clientId,
 
 void MainWindow::onHandRaiseReceived(const QString& clientId,
                                       const QString& message) {
-    if (m_session) m_session->setClientHandRaised(clientId, true, message);
     const ClientState s = m_session ? m_session->clientState(clientId) : ClientState{};
-    const QString name = s.hostname.isEmpty() ? clientId : (s.username.isEmpty() ? s.hostname : (s.hostname + " (" + s.username + ")"));
+
+    // Yoksayılan kullanıcıdan gelen yardım taleplerini sessizce engelle
+    if (m_privateChatMgr && m_privateChatMgr->isUserIgnored(clientId, s.username)) {
+        return;
+    }
+
+    if (m_session) m_session->setClientHandRaised(clientId, true, message);
+    const QString name = RoomManager::formatStudentDisplayName(s.userDisplayName, s.username, s.hostname, clientId);
     const QString label = tr("Yardım Talebi: ") + name
                           + (message.isEmpty() ? "" : " — \"" + message + "\"");
     showCommandStatus(true, label);
@@ -42,19 +48,36 @@ void MainWindow::onHandRaiseReceived(const QString& clientId,
         return;
     }
 
+    // Zaten açık özel sohbet varsa tekrar onay penceresi açma; notu doğrudan oturuma ekle
+    if (m_privateChatMgr) {
+        const QString existingSessionId = m_privateChatMgr->sessionIdForPeer(clientId);
+        if (!existingSessionId.isEmpty()) {
+            const QString noteText = message.isEmpty()
+                ? tr("Öğrenci tekrar yardım talebinde bulundu.")
+                : tr("Öğrencinin Yardım Notu: \"%1\"").arg(message);
+            m_privateChatMgr->appendSystemMessage(existingSessionId, noteText);
+            if (m_chatWindow) {
+                m_chatWindow->switchToTab(existingSessionId);
+                m_chatWindow->showAndRaise();
+            }
+            return;
+        }
+    }
+
     if (!m_chatWindow || !m_chatWindow->isVisible()) {
         QMessageBox msgBox(this);
         msgBox.setWindowTitle(tr("Öğrenci Yardım Talebi"));
-        QString text = QString(tr("<b>%1</b> yardım talebinde bulundu!")).arg(name);
+        QString text = QString(tr("<b>%1</b> yardım talebinde bulundu!")).arg(name.toHtmlEscaped());
         if (!message.isEmpty()) {
-            text += QString("<br><i>Mesaj: \"%1\"</i>").arg(message);
+            text += QString("<br><i>%1: \"%2\"</i>").arg(tr("Mesaj"), message.toHtmlEscaped());
         }
         text += tr("<br><br>Bu öğrenci ile özel sohbet başlatmak ister misiniz?");
         msgBox.setText(text);
         msgBox.setIcon(QMessageBox::Information);
         QPushButton* btnChat = msgBox.addButton(tr("Özel Sohbet Başlat"), QMessageBox::AcceptRole);
         QPushButton* btnOpenChat = msgBox.addButton(tr("Sohbet Penceresini Aç"), QMessageBox::ActionRole);
-        msgBox.addButton("Kapat", QMessageBox::RejectRole);
+        QPushButton* btnIgnore = msgBox.addButton(tr("Yoksay (Engelle)"), QMessageBox::DestructiveRole);
+        msgBox.addButton(tr("Kapat"), QMessageBox::RejectRole);
         msgBox.setDefaultButton(btnChat);
         msgBox.exec();
 
@@ -69,6 +92,10 @@ void MainWindow::onHandRaiseReceived(const QString& clientId,
             if (m_chatWindow) m_chatWindow->showAndRaise();
         } else if (msgBox.clickedButton() == btnOpenChat) {
             if (m_chatWindow) m_chatWindow->showAndRaise();
+        } else if (msgBox.clickedButton() == btnIgnore) {
+            if (m_privateChatMgr) {
+                m_privateChatMgr->ignoreUser(clientId, s.username);
+            }
         }
     }
 }

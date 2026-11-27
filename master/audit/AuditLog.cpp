@@ -40,7 +40,7 @@ void AuditLog::record(const AuditEvent& event) {
     const QString userId = event.userId.isEmpty()  ? m_userId   : event.userId;
     qint64 timestamp = event.timestamp.isValid() ? event.timestamp.toSecsSinceEpoch() : QDateTime::currentSecsSinceEpoch();
 
-    if (m_session && m_session->isConnected()) {
+    if (m_session && m_session->isConnected() && m_session->isAuthenticated()) {
         m_session->sendAuditLogRecord(
             actor,
             event.target,

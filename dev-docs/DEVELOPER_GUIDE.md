@@ -11,10 +11,11 @@ Okidia, esnek ve modüler bir CMake derleme sistemine sahiptir. Modern C++20 öz
 ### 1.1 Bağımlılıkların Kurulması (Ubuntu/Debian)
 ```bash
 sudo apt update
-sudo apt install build-essential cmake qt6-base-dev qt6-multimedia-dev qt6-tools-dev \
-                 libssl-dev libssh2-1-dev protobuf-compiler libprotobuf-dev \
+sudo apt install build-essential cmake pkg-config qt6-base-dev qt6-multimedia-dev qt6-tools-dev \
+                 qt6-wayland libssl-dev libssh2-1-dev protobuf-compiler libprotobuf-dev \
                  libsystemd-dev openssl libxkbcommon-dev libavahi-client-dev \
-                 libxtst-dev libxfixes-dev libqt6svg6 qt6-translations-l10n
+                 libxtst-dev libxfixes-dev libqt6svg6 qt6-translations-l10n \
+                 libpipewire-0.3-dev xdg-desktop-portal libsqlite3-dev libjpeg-dev
 ```
 
 ### 1.2 Derleme Parametreleri

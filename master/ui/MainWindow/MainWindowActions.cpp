@@ -120,18 +120,39 @@ void MainWindow::setupConnections() {
             if (m_audioResetTimer) m_audioResetTimer->stop();
         };
 
+        auto setAudioActiveUi = [this, actStop]() {
+            actStop->setEnabled(true);
+            ui->btnAudio->setProperty("audioActive", true);
+            ui->btnAudio->style()->unpolish(ui->btnAudio);
+            ui->btnAudio->style()->polish(ui->btnAudio);
+            ui->btnAudio->setText(tr("Oynatılıyor ●"));
+        };
+
+        if (m_session) {
+            connect(m_session, &SessionManager::announceActiveStateChanged, this,
+                    [setAudioActiveUi, resetBtn](bool active, const QString&) {
+                if (active) {
+                    setAudioActiveUi();
+                } else {
+                    resetBtn();
+                }
+            });
+        }
+
         // Canlı Anons (Mikrofon)
         connect(actLiveMic, &QAction::triggered, [this, resetBtn]() {
             if (!m_session) return;
             const QStringList targets = commandTargets();
             LiveAnnounceDialog dlg(m_session, targets, commandTargetsDescription(), this);
             dlg.exec();
-            resetBtn();
+            if (!m_session->isAnnounceActive()) {
+                resetBtn();
+            }
         });
 
         // Dosyadan oynat
         connect(actFile, &QAction::triggered,
-                [this, actLiveMic, actLive, actStop, resetBtn]() {
+                [this, setAudioActiveUi]() {
             if (!m_session) return;
 
             const QStringList targets = commandTargets();
@@ -150,37 +171,16 @@ void MainWindow::setupConnections() {
             dlg.exec();
 
             if (dlg.wasPublished()) {
-                actLiveMic->setEnabled(false);
-                actLive->setEnabled(false);
-                actStop->setEnabled(true);
-                ui->btnAudio->setProperty("audioActive", true);
-                ui->btnAudio->style()->unpolish(ui->btnAudio);
-                ui->btnAudio->style()->polish(ui->btnAudio);
-                ui->btnAudio->setText(tr("Oynatılıyor ●"));
+                setAudioActiveUi();
                 showCommandStatus(true, tr("Ses Yayını (%1) → %2 istemci")
                     .arg(QFileInfo(path).fileName())
                     .arg(dlg.targets().size()));
-
-                // Probe sessiz oynat → bitince UI sıfırla
-                auto* probe = new QMediaPlayer(this);
-                auto* ao    = new QAudioOutput(this);
-                probe->setAudioOutput(ao);
-                ao->setVolume(0.0f);
-                probe->setSource(QUrl::fromLocalFile(path));
-                connect(probe, &QMediaPlayer::playbackStateChanged,
-                        [this, probe, ao, resetBtn](QMediaPlayer::PlaybackState s) {
-                    if (s != QMediaPlayer::StoppedState) return;
-                    probe->deleteLater();
-                    ao->deleteLater();
-                    resetBtn();
-                });
-                probe->play();
             }
         });
 
         // Anons Kaydet — dialog aç, kaydet, Yayınla → file transfer
         connect(actLive, &QAction::triggered,
-                [this]() {
+                [this, setAudioActiveUi]() {
             if (!m_session) return;
 
             const QStringList targets = commandTargets();
@@ -193,12 +193,12 @@ void MainWindow::setupConnections() {
             dlg.exec();
 
             if (dlg.wasPublished()) {
-                // Anons file transfer ile gönderildi — yayın modu değil
+                setAudioActiveUi();
                 showCommandStatus(true, tr("Anons → %1 istemci").arg(dlg.targets().size()));
             }
         });
 
-        // Durdur
+        // Durdur — her zaman tıklanabilir veya aktif anons varken anında durdurur
         connect(actStop, &QAction::triggered, [this, resetBtn]() {
             if (m_session) m_session->broadcastAudioStop();
             resetBtn();
@@ -275,6 +275,20 @@ void MainWindow::setupConnections() {
             } else {
                 // Şu an oynatılıyor -> Duraklat
                 ui->fpsCombo->setCurrentIndex(0);
+            }
+        });
+    }
+    if (ui->btnRefreshThumbnails) {
+        connect(ui->btnRefreshThumbnails, &QPushButton::clicked, this, [this]() {
+            if (!m_session || !m_session->isConnected()) {
+                showCommandStatus(false, tr("Sunucu (Broker) bağlantısı yok!"));
+                return;
+            }
+            const int count = m_session->refreshVisibleThumbnails();
+            if (count > 0) {
+                showCommandStatus(true, tr("%1 istemcinin ekran görüntüsü yenileniyor...").arg(count));
+            } else {
+                showCommandStatus(true, tr("Yenilenecek çevrimiçi istemci bulunamadı."));
             }
         });
     }

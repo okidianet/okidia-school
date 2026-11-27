@@ -604,7 +604,13 @@ void SessionManager::onMessageReceived(
                              QString::fromStdString(resp.error_msg()),
                              resp.must_change_pw());
 
+            if (m_reauthWatchdogTimer && m_reauthWatchdogTimer->isActive()) {
+                m_reauthWatchdogTimer->stop();
+            }
+            m_reauthRetryAttempted = false;
+
             if (resp.success()) {
+                m_isAuthenticated = true;
                 m_activeUser.id = QString::fromStdString(resp.user_id());
                 m_activeUser.username = !m_username.isEmpty() ? m_username : m_activeUser.username;
                 m_activeUser.role = QString::fromStdString(resp.role());
@@ -658,11 +664,23 @@ void SessionManager::onMessageReceived(
                 fetchSshCredentials();
                 sendRefreshBroadcast();
 
-                // Broker'da oturumumuz artık doğrulandı; görünür istemci aboneliklerini güvenle ilet
+                // Broker'da oturumumuz artık doğrulandı; görünür istemci aboneliklerini ve watchdog'u güvenle başlat
+                m_lastSentIntervalMs = -1;
                 if (!m_visibleClients.isEmpty()) {
                     setVisibleClients(m_visibleClients);
                 }
+                if (m_blankThumbWatchdog && !m_blankThumbWatchdog->isActive()) {
+                    m_blankThumbWatchdog->start();
+                }
             } else {
+                m_isAuthenticated = false;
+                if (m_blankThumbWatchdog && m_blankThumbWatchdog->isActive()) {
+                    m_blankThumbWatchdog->stop();
+                }
+                if (m_staggerRefreshTimer && m_staggerRefreshTimer->isActive()) {
+                    m_staggerRefreshTimer->stop();
+                }
+                m_staggerRefreshQueue.clear();
                 if (m_isOfflineMode) {
                     Logger::warning(QObject::tr("SessionManager: Çevrimdışı modda iken yapılan arka plan girişi reddedildi!"));
                     emit offlineLoginFailed(QString::fromStdString(resp.error_msg()));
@@ -756,6 +774,18 @@ void SessionManager::onMessageReceived(
         okidia::CustomProfileDeleteRes resp;
         if (resp.ParseFromString(envelope.payload())) {
             emit customProfileDeleteResult(resp.success(), QString::fromStdString(resp.error_msg()));
+            if (resp.success()) {
+                requestDbBackup();
+            }
+        }
+        return;
+    }
+
+    // ── DB_MASTER_DEVICE_DEL_RES ──────────────────────────────────────
+    if (envelope.type() == okidia::MessageType::DB_MASTER_DEVICE_DEL_RES) {
+        okidia::DbMasterDeviceDeleteRes resp;
+        if (resp.ParseFromString(envelope.payload())) {
+            emit dbMasterDeviceDeleteResult(resp.success(), QString::fromStdString(resp.error_msg()));
             if (resp.success()) {
                 requestDbBackup();
             }
@@ -969,6 +999,21 @@ void SessionManager::onMessageReceived(
         if (cls.ParseFromString(envelope.payload())) {
             const QString classId = QString::fromStdString(cls.class_id());
             emit chatLockStateReceived(classId, cls.chat_locked(), cls.private_locked());
+        }
+        return;
+    }
+
+    if (envelope.type() == okidia::MessageType::CHAT_MUTE_STATE) {
+        okidia::ChatMuteState cms;
+        if (cms.ParseFromString(envelope.payload())) {
+            emit chatMuteStateReceived(
+                QString::fromStdString(cms.client_id()),
+                QString::fromStdString(cms.username()),
+                cms.muted(),
+                static_cast<qint64>(cms.muted_until()),
+                static_cast<int>(cms.violation_level()),
+                QString::fromStdString(cms.reason())
+            );
         }
         return;
     }
@@ -1294,6 +1339,7 @@ void SessionManager::handleClientInfo(
     }
 
     bool wasConnected = m_clientStates.value(clientId).connected;
+    const QString prevUsername = m_clientStates.value(clientId).username;
     ClientState state = m_clientStates.value(clientId);
     state.clientId   = clientId;
     state.hostname   = QString::fromStdString(info.hostname());
@@ -1441,10 +1487,13 @@ void SessionManager::handleClientInfo(
 
     emit clientConnected(clientId, state);
     if (!wasConnected) {
-        if (m_conn && m_conn->isConnected() && m_visibleClients.contains(clientId) && !m_streamingClients.contains(clientId)) {
+        if (m_conn && m_conn->isConnected() && m_isAuthenticated && !m_isOfflineMode &&
+            m_visibleClients.contains(clientId) && !m_streamingClients.contains(clientId)) {
             int intervalMs = calculateAdaptiveFps(m_visibleClients.size());
             okidia::ScreenConfig cfg;
             cfg.set_interval_ms(static_cast<uint32_t>(intervalMs));
+            cfg.set_jpeg_quality(60);
+            cfg.set_max_width(360);
             okidia::Envelope fpsEnv;
             fpsEnv.set_type(okidia::MessageType::SCREEN_FPS_SET);
             fpsEnv.set_payload(cfg.SerializeAsString());
@@ -1453,6 +1502,25 @@ void SessionManager::handleClientInfo(
             Logger::info(QObject::tr("SessionManager: Yeniden bağlanan görünür istemciye doğrudan SCREEN_FPS_SET gönderildi → %1 (%2 ms)").arg(clientId).arg(intervalMs));
         }
         updateAdaptiveFps();
+    } else if (prevUsername != state.username && !m_isStreamPaused &&
+               m_visibleClients.contains(clientId) && !m_streamingClients.contains(clientId) &&
+               state.agentType != 2) {
+        // Kullanıcı oturum açma/kapama geçişinde yeni masaüstünün tam karesini 600ms sonra otomatik talep et
+        QTimer::singleShot(600, this, [this, clientId]() {
+            if (!m_conn || !m_conn->isConnected() || !m_isAuthenticated || m_isOfflineMode || m_isStreamPaused) return;
+            if (!m_visibleClients.contains(clientId) || m_streamingClients.contains(clientId)) return;
+            const int intervalMs = calculateAdaptiveFps(m_visibleClients.size());
+            if (intervalMs <= 0) return;
+            okidia::ScreenConfig cfg;
+            cfg.set_interval_ms(static_cast<uint32_t>(intervalMs));
+            cfg.set_jpeg_quality(60);
+            cfg.set_max_width(360);
+            okidia::Envelope fpsEnv;
+            fpsEnv.set_type(okidia::MessageType::SCREEN_FPS_SET);
+            fpsEnv.set_payload(cfg.SerializeAsString());
+            fpsEnv.set_target_id(clientId.toStdString());
+            m_conn->sendEnvelope(fpsEnv);
+        });
     }
 }
 
@@ -1611,5 +1679,22 @@ void SessionManager::handleJoinCodeResponse(const okidia::Envelope& env) {
                               resp.success(), 
                               QString::fromStdString(resp.error_msg()));
     }
+}
+
+void SessionManager::sendChatMuteState(const QString& clientId, const QString& username,
+                                       bool muted, int durationSecs, const QString& reason) {
+    if (clientId.isEmpty()) return;
+    okidia::ChatMuteState proto;
+    proto.set_client_id(clientId.toStdString());
+    proto.set_username(username.toStdString());
+    proto.set_muted(muted);
+    proto.set_duration_secs(durationSecs > 0 ? static_cast<uint32_t>(durationSecs) : 0);
+    proto.set_reason(reason.toStdString());
+
+    okidia::Envelope env;
+    env.set_type(okidia::MessageType::CHAT_MUTE_STATE);
+    env.set_target_id(clientId.toStdString());
+    env.set_payload(proto.SerializeAsString());
+    broadcastCommand(env);
 }
 

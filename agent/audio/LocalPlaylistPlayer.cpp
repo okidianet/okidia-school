@@ -2,13 +2,21 @@
 #include "LocalPlaylistPlayer.h"
 #include "../../common/utils/Logger.h"
 #include "../../common/OkidiaConfig.h"
+#include "../../common/ui/ThemeManager.h"
 
 #include <QUrl>
 #include <QFile>
+#include <QFileInfo>
 #include <QDir>
 #include <QCoreApplication>
 #include <QMediaPlayer>
 #include <QAudioOutput>
+#include <QAudioSink>
+#include <QAudioFormat>
+#include <QMediaDevices>
+#include <QAudioDevice>
+#include <QBuffer>
+#include <QtEndian>
 #include <QVBoxLayout>
 #include <QHBoxLayout>
 #include <QLabel>
@@ -18,30 +26,103 @@
 #include <QTimer>
 #include <QProcess>
 #include <QStandardPaths>
+#include <cmath>
+#include <vector>
 #if !defined(Q_OS_WIN)
 #  include <unistd.h>
+#  include <pwd.h>
+#  include "../capture/WaylandPortalCapture.h"
 #endif
 #include "../system/SystemInfo.h"
+
+static bool resolveLinuxAudioUser(QString& outUser, QString& outUid, QString& outGid, QString& outRunDir) {
+#if !defined(Q_OS_WIN)
+    QString username, uid;
+    if (SystemInfo::getAudioSession(username, uid) && !uid.isEmpty() && uid != QLatin1String("0")) {
+        const QString runDir = QStringLiteral("/run/user/") + uid;
+        if (QDir(runDir).exists()) {
+            outUser = username;
+            outUid = uid;
+            outRunDir = runDir;
+            const QFileInfo rtInfo(runDir);
+            outGid = QString::number(rtInfo.groupId());
+            if (struct passwd* pw = ::getpwuid(static_cast<uid_t>(uid.toUInt()))) {
+                outGid = QString::number(pw->pw_gid);
+                if (pw->pw_name) {
+                    outUser = QString::fromUtf8(pw->pw_name);
+                }
+            }
+            return true;
+        }
+    }
+#else
+    Q_UNUSED(outUser);
+    Q_UNUSED(outUid);
+    Q_UNUSED(outGid);
+    Q_UNUSED(outRunDir);
+#endif
+    return false;
+}
+
+static bool isRootWithoutAudioEnv() {
+#if !defined(Q_OS_WIN)
+    if (::geteuid() == 0) {
+        return qEnvironmentVariable("XDG_RUNTIME_DIR").isEmpty() &&
+               qEnvironmentVariable("PULSE_RUNTIME_PATH").isEmpty();
+    }
+#endif
+    return false;
+}
+
+static QString detectAudioMagicFormat(const QString& path) {
+    QFile f(path);
+    if (f.open(QIODevice::ReadOnly)) {
+        const QByteArray hdr = f.read(16);
+        f.close();
+        if (hdr.size() >= 12 && hdr.startsWith("RIFF") && hdr.mid(8, 4) == "WAVE") {
+            return QStringLiteral("wav");
+        }
+        if (hdr.size() >= 4 && hdr.startsWith("OggS")) {
+            return QStringLiteral("ogg");
+        }
+        if (hdr.size() >= 4 && hdr.startsWith("fLaC")) {
+            return QStringLiteral("flac");
+        }
+        if (hdr.size() >= 8 && hdr.mid(4, 4) == "ftyp") {
+            return QStringLiteral("m4a");
+        }
+        if (hdr.size() >= 3 && hdr.startsWith("ID3")) {
+            return QStringLiteral("mp3");
+        }
+        if (hdr.size() >= 2 &&
+            static_cast<unsigned char>(hdr[0]) == 0xFF &&
+            (static_cast<unsigned char>(hdr[1]) & 0xE0) == 0xE0) {
+            return QStringLiteral("mp3");
+        }
+    }
+    return QFileInfo(path).suffix().toLower();
+}
 
 static QProcessEnvironment audioEnv() {
     QProcessEnvironment env = QProcessEnvironment::systemEnvironment();
 #if !defined(Q_OS_WIN)
-    // Eğer root değilsek, sistem ortamını olduğu gibi kullan
     if (::geteuid() != 0) {
+        if (!env.contains("PULSE_RUNTIME_PATH")) {
+            const QString xdg = env.value("XDG_RUNTIME_DIR");
+            if (!xdg.isEmpty() && QDir(xdg + "/pulse").exists()) {
+                env.insert("PULSE_RUNTIME_PATH", xdg + "/pulse");
+            }
+        }
         return env;
     }
 
-    // Root olarak çalışırken aktif kullanıcı ses oturumu varsa bağla
     if (!env.contains("PULSE_RUNTIME_PATH") && !env.contains("XDG_RUNTIME_DIR")) {
-        QString username, uid;
-        if (SystemInfo::getAudioSession(username, uid) && !uid.isEmpty()) {
-            QString userRunDir = "/run/user/" + uid;
-            if (QDir(userRunDir).exists()) {
-                env.insert("PULSE_RUNTIME_PATH", userRunDir + "/pulse");
-                env.insert("XDG_RUNTIME_DIR", userRunDir);
-                env.insert("DBUS_SESSION_BUS_ADDRESS", "unix:path=" + userRunDir + "/bus");
-                Logger::info(QObject::tr("LocalPlaylistPlayer: Ses oturumu tespit edildi -> %1 (UID: %2)").arg(username, uid));
-            }
+        QString username, uid, gid, userRunDir;
+        if (resolveLinuxAudioUser(username, uid, gid, userRunDir)) {
+            env.insert("PULSE_RUNTIME_PATH", userRunDir + "/pulse");
+            env.insert("XDG_RUNTIME_DIR", userRunDir);
+            env.insert("DBUS_SESSION_BUS_ADDRESS", "unix:path=" + userRunDir + "/bus");
+            Logger::info(QObject::tr("LocalPlaylistPlayer: Ses oturumu tespit edildi -> %1 (UID: %2)").arg(username, uid));
         }
     }
 #endif
@@ -58,8 +139,6 @@ LocalPlaylistPlayer::LocalPlaylistPlayer(const QString& anonsPath,
     , m_repeatCount(qMax(1, repeatCount))
     , m_isBell(isBell)
 {
-    // Windows ve farklı dosya yolları uyumluluğu:
-    // Broker anons yolunu /tmp/... olarak göndermiş olabilir; Windows'ta veya özel ortamlarda dosya QDir::tempPath() altındadır.
     if (!QFile::exists(m_anonsPath)) {
         QString filename = QFileInfo(m_anonsPath).fileName();
         QString tempResolved = QDir::tempPath() + "/" + filename;
@@ -69,7 +148,6 @@ LocalPlaylistPlayer::LocalPlaylistPlayer(const QString& anonsPath,
         }
     }
 
-    // dingdong.wav dosyasının varlığını teyit et; yoksa alternatif yollara ve gömülü kaynağa bak
     if (!QFile::exists(m_dingPath)) {
         QString appDirDing = QCoreApplication::applicationDirPath() + "/sounds/dingdong.wav";
         QString resDirDing = QCoreApplication::applicationDirPath() + "/../resources/sound/dingdong.wav";
@@ -78,7 +156,6 @@ LocalPlaylistPlayer::LocalPlaylistPlayer(const QString& anonsPath,
         } else if (QFile::exists(resDirDing)) {
             m_dingPath = resDirDing;
         } else if (QFile::exists(":/sound/dingdong.wav")) {
-            // Gömülü Qt kaynağından geçici dizine çıkar
             QString tempDing = QDir::tempPath() + "/okidia_dingdong.wav";
             if (!QFile::exists(tempDing) || QFile(tempDing).size() == 0) {
                 QFile::remove(tempDing);
@@ -97,19 +174,50 @@ LocalPlaylistPlayer::LocalPlaylistPlayer(const QString& anonsPath,
 }
 
 LocalPlaylistPlayer::~LocalPlaylistPlayer() {
-    if (m_maxDurationTimer) {
-        m_maxDurationTimer->stop();
+    if (m_maxDurationTimer) m_maxDurationTimer->stop();
+    if (m_splashWatchdog) m_splashWatchdog->stop();
+    if (m_fadeOutTimer) m_fadeOutTimer->stop();
+    stopQtStartWatchdog();
+    if (m_wavSink) {
+        m_wavSink->disconnect(this);
+        m_wavSink->stop();
+        delete m_wavSink;
+        m_wavSink = nullptr;
     }
-    if (m_fadeOutTimer) {
-        m_fadeOutTimer->stop();
+    if (m_wavBuffer) {
+        m_wavBuffer->close();
+        delete m_wavBuffer;
+        m_wavBuffer = nullptr;
     }
-    if (m_currentProcess && m_currentProcess->state() != QProcess::NotRunning) {
-        m_currentProcess->terminate();
-        m_currentProcess->kill();
-    }
+    terminateActiveProcess();
     if (m_qtPlayer) {
+        m_qtPlayer->disconnect(this);
         m_qtPlayer->stop();
     }
+    closeSplash();
+}
+
+void LocalPlaylistPlayer::terminateActiveProcess() {
+    if (!m_currentProcess) return;
+    QProcess* p = m_currentProcess;
+    m_currentProcess = nullptr;
+    p->disconnect(this);
+
+    if (p->state() != QProcess::NotRunning) {
+#if defined(Q_OS_WIN)
+        const qint64 pid = p->processId();
+        if (pid > 0) {
+            QProcess::execute("taskkill.exe", {"/F", "/T", "/PID", QString::number(pid)});
+        }
+        p->kill();
+#else
+        p->terminate();
+        if (!p->waitForFinished(150)) {
+            p->kill();
+        }
+#endif
+    }
+    p->deleteLater();
 }
 
 QString LocalPlaylistPlayer::resolveBellPath(const QString& requestedPath) {
@@ -119,14 +227,12 @@ QString LocalPlaylistPlayer::resolveBellPath(const QString& requestedPath) {
 
     QString fname = QFileInfo(requestedPath).fileName();
     if (!fname.isEmpty()) {
-        // 1. İstemcinin kendi yerel varlık dizininde doğrudan isim kontrolü
         QString localAsset = OkidiaConfig::assetsDir() + "/" + fname;
         if (QFile::exists(localAsset) && QFileInfo(localAsset).size() > 0) {
             Logger::info(QObject::tr("LocalPlaylistPlayer: Hedef zil yerel varlık dizininde bulundu → ") + localAsset);
             return localAsset;
         }
 
-        // 2. Windows veya geçici dizinde isim bazlı kontrol
         QString tempResolved = QDir::tempPath() + "/" + fname;
         if (QFile::exists(tempResolved) && QFileInfo(tempResolved).size() > 0) {
             Logger::info(QObject::tr("LocalPlaylistPlayer: Zil geçici dizinde bulundu → ") + tempResolved);
@@ -134,7 +240,6 @@ QString LocalPlaylistPlayer::resolveBellPath(const QString& requestedPath) {
         }
     }
 
-    // 3. Tipe Özel Akıllı Arama (Öğrenci, Öğretmen veya Teneffüs ziline özel dosya eşleştirme)
     QString targetPrefix;
     if (requestedPath.contains("bell_student", Qt::CaseInsensitive) || requestedPath.contains("student", Qt::CaseInsensitive)) {
         targetPrefix = "bell_student";
@@ -160,7 +265,6 @@ QString LocalPlaylistPlayer::resolveBellPath(const QString& requestedPath) {
         }
     }
 
-    // Son çare: Tek seferlik saf dingdong.wav
     Logger::warning(QObject::tr("LocalPlaylistPlayer: Hiçbir zil dosyası bulunamadı, varsayılan melodi çalınacak: %1")
                     .arg(m_dingPath));
     return m_dingPath;
@@ -172,27 +276,35 @@ void LocalPlaylistPlayer::start() {
         m_state = State::Intro;
         Logger::info(QObject::tr("LocalPlaylistPlayer: Yönetici anonsu başlatıldı — anons=%1 tekrar=%2")
                      .arg(m_anonsPath).arg(m_repeatCount));
+
+        // Splash penceresi için bağımsız emniyet watchdog'u (dosya boyutuna göre tahmini süre + marj, max 5 dk)
+        const qint64 fsz = QFileInfo(m_anonsPath).size();
+        const int estSingleMs = qBound(8000, static_cast<int>((fsz / 48) + 8000), 180000);
+        const int maxWaitMs = qMin(300000, estSingleMs * qMax(1, m_repeatCount) + 15000);
+        m_splashWatchdog = new QTimer(this);
+        m_splashWatchdog->setSingleShot(true);
+        connect(m_splashWatchdog, &QTimer::timeout, this, [this]() {
+            Logger::warning(QObject::tr("LocalPlaylistPlayer: Anons emniyet zaman aşımı doldu, oynatma ve popup kapatılıyor."));
+            abort();
+        });
+        m_splashWatchdog->start(maxWaitMs);
+
         playFile(m_dingPath);
     } else {
-        // Okul Zili: ASLA splash açılmaz, ASLA intro/outro dingdong işletilmez!
         m_state = State::Anons;
         m_anonsPlayed = 1;
-
-        // Akıllı fallback ile zil dosyasını garantile
         m_anonsPath = resolveBellPath(m_anonsPath);
         Logger::info(QObject::tr("LocalPlaylistPlayer: Okul zili başlatıldı — hedef=%1 (Tavan: 60 sn)")
                      .arg(m_anonsPath));
 
-        // 1. Maksimum 60 saniye tavan süresi sayacı
         m_maxDurationTimer = new QTimer(this);
         m_maxDurationTimer->setSingleShot(true);
         connect(m_maxDurationTimer, &QTimer::timeout, this, [this]() {
             Logger::info(QObject::tr("LocalPlaylistPlayer: 60 saniye zil tavan süresi doldu, ses sonlandırılıyor."));
             stopPlaybackAndFinish();
         });
-        m_maxDurationTimer->start(60000); // 60 saniye
+        m_maxDurationTimer->start(60000);
 
-        // 2. 55. saniyede 5 saniyelik Fade-Out (yumuşak sönümleme)
         QTimer::singleShot(55000, this, [this]() {
             if (m_state != State::Done) {
                 startFadeOut();
@@ -208,7 +320,7 @@ void LocalPlaylistPlayer::startFadeOut() {
 
     Logger::info(QObject::tr("LocalPlaylistPlayer: 55. saniye doldu, yumuşak sönümleme (Fade-Out) devrede..."));
     m_fadeOutTimer = new QTimer(this);
-    m_fadeOutTimer->setInterval(250); // 5 saniyede 20 adım
+    m_fadeOutTimer->setInterval(250);
 
     connect(m_fadeOutTimer, &QTimer::timeout, this, [this]() {
         if (m_state == State::Done) {
@@ -220,18 +332,22 @@ void LocalPlaylistPlayer::startFadeOut() {
         if (m_currentVolume <= 0.05f) {
             m_currentVolume = 0.0f;
             m_fadeOutTimer->stop();
-            if (m_qtAudio) {
-                m_qtAudio->setVolume(0.0f);
-            }
+            if (m_wavSink) m_wavSink->setVolume(0.0f);
+            if (m_qtAudio) m_qtAudio->setVolume(0.0f);
             stopPlaybackAndFinish();
         } else {
-            if (m_qtAudio) {
-                m_qtAudio->setVolume(m_currentVolume);
-            }
+            if (m_wavSink) m_wavSink->setVolume(m_currentVolume);
+            if (m_qtAudio) m_qtAudio->setVolume(m_currentVolume);
         }
     });
 
     m_fadeOutTimer->start();
+}
+
+void LocalPlaylistPlayer::stopQtStartWatchdog() {
+    if (m_qtStartWatchdog) {
+        m_qtStartWatchdog->stop();
+    }
 }
 
 void LocalPlaylistPlayer::stopPlaybackAndFinish() {
@@ -241,13 +357,24 @@ void LocalPlaylistPlayer::stopPlaybackAndFinish() {
     if (m_fadeOutTimer && m_fadeOutTimer->isActive()) {
         m_fadeOutTimer->stop();
     }
+    stopQtStartWatchdog();
 
-    if (m_currentProcess && m_currentProcess->state() != QProcess::NotRunning) {
-        m_currentProcess->terminate();
-        QTimer::singleShot(400, m_currentProcess, &QProcess::kill);
+    if (m_wavSink) {
+        m_wavSink->disconnect(this);
+        m_wavSink->stop();
+        delete m_wavSink;
+        m_wavSink = nullptr;
+    }
+    if (m_wavBuffer) {
+        m_wavBuffer->close();
+        delete m_wavBuffer;
+        m_wavBuffer = nullptr;
     }
 
+    terminateActiveProcess();
+
     if (m_qtPlayer) {
+        m_qtPlayer->disconnect(this);
         m_qtPlayer->stop();
     }
 
@@ -255,32 +382,220 @@ void LocalPlaylistPlayer::stopPlaybackAndFinish() {
 }
 
 void LocalPlaylistPlayer::abort() {
+    if (m_state == State::Done) return;
     Logger::info(QObject::tr("LocalPlaylistPlayer: Oynatma zorla durduruluyor (abort)..."));
     m_state = State::Done;
-    if (m_maxDurationTimer && m_maxDurationTimer->isActive()) {
-        m_maxDurationTimer->stop();
+
+    if (m_maxDurationTimer && m_maxDurationTimer->isActive()) m_maxDurationTimer->stop();
+    if (m_splashWatchdog && m_splashWatchdog->isActive()) m_splashWatchdog->stop();
+    if (m_fadeOutTimer && m_fadeOutTimer->isActive()) m_fadeOutTimer->stop();
+    stopQtStartWatchdog();
+
+    if (m_wavSink) {
+        m_wavSink->disconnect(this);
+        m_wavSink->stop();
+        delete m_wavSink;
+        m_wavSink = nullptr;
     }
-    if (m_fadeOutTimer && m_fadeOutTimer->isActive()) {
-        m_fadeOutTimer->stop();
+    if (m_wavBuffer) {
+        m_wavBuffer->close();
+        delete m_wavBuffer;
+        m_wavBuffer = nullptr;
     }
 
-    if (m_currentProcess && m_currentProcess->state() != QProcess::NotRunning) {
-        m_currentProcess->terminate();
-        QTimer::singleShot(200, m_currentProcess, &QProcess::kill);
-    }
+    terminateActiveProcess();
 
     if (m_qtPlayer) {
+        m_qtPlayer->disconnect(this);
         m_qtPlayer->stop();
     }
 
-    if (m_anonsPath.startsWith("/tmp/") || m_anonsPath.startsWith(QDir::tempPath())) {
+    if (!m_isBell && (m_anonsPath.startsWith("/tmp/") || m_anonsPath.startsWith(QDir::tempPath()))) {
         QFile::remove(m_anonsPath);
     }
     closeSplash();
     deleteLater();
 }
 
+// ---------------------------------------------------------------------------
+// Birleşik Süreç İçi WAV Oynatıcı (Saf Qt6 QAudioSink + Format Dönüştürücü)
+// Harici süreç (pw-play, mpv, PowerShell WMPlayer) başlatmadan, tüm platformlarda
+// sıfır kesiklik ve anında durdurulabilirlik sağlar.
+// ---------------------------------------------------------------------------
+bool LocalPlaylistPlayer::tryPlayWavWithAudioSink(const QString& path) {
+    QFile f(path);
+    if (!f.open(QIODevice::ReadOnly)) return false;
+
+    const QByteArray wavBytes = f.readAll();
+    f.close();
+
+    if (wavBytes.size() <= 44 || !wavBytes.startsWith("RIFF") || wavBytes.mid(8, 4) != "WAVE") {
+        return false;
+    }
+
+    int idx = 12;
+    quint16 audioFmt = 0;
+    quint16 wavCh = 1;
+    quint32 wavSr = 24000;
+    quint16 wavBits = 16;
+    int dataOff = 0;
+    int dataLen = 0;
+
+    while (idx + 8 <= wavBytes.size()) {
+        const QByteArray cid = wavBytes.mid(idx, 4);
+        const quint32 csz = qFromLittleEndian<quint32>(reinterpret_cast<const uchar*>(wavBytes.constData() + idx + 4));
+        if (cid == "fmt " && csz >= 16) {
+            audioFmt = qFromLittleEndian<quint16>(reinterpret_cast<const uchar*>(wavBytes.constData() + idx + 8));
+            wavCh    = qFromLittleEndian<quint16>(reinterpret_cast<const uchar*>(wavBytes.constData() + idx + 10));
+            wavSr    = qFromLittleEndian<quint32>(reinterpret_cast<const uchar*>(wavBytes.constData() + idx + 12));
+            wavBits  = qFromLittleEndian<quint16>(reinterpret_cast<const uchar*>(wavBytes.constData() + idx + 22));
+        } else if (cid == "data") {
+            dataOff = idx + 8;
+            dataLen = qMin<int>(csz, wavBytes.size() - dataOff);
+            break;
+        }
+        idx += 8 + csz;
+    }
+
+    if (audioFmt != 1 || wavBits != 16 || dataOff <= 0 || dataLen <= 0 || wavCh == 0 || wavSr < 8000 || wavSr > 96000) {
+        return false;
+    }
+
+    const QAudioDevice outDev = QMediaDevices::defaultAudioOutput();
+    if (outDev.isNull()) {
+        return false;
+    }
+
+    if (m_wavSink) {
+        m_wavSink->disconnect(this);
+        m_wavSink->stop();
+        delete m_wavSink;
+        m_wavSink = nullptr;
+    }
+    if (m_wavBuffer) {
+        m_wavBuffer->close();
+        delete m_wavBuffer;
+        m_wavBuffer = nullptr;
+    }
+
+    QAudioFormat outFmt;
+    outFmt.setSampleRate(static_cast<int>(wavSr));
+    outFmt.setChannelCount(static_cast<int>(wavCh));
+    outFmt.setSampleFormat(QAudioFormat::Int16);
+
+    if (!outDev.isFormatSupported(outFmt)) {
+        outFmt = outDev.preferredFormat();
+        if (outFmt.sampleRate() <= 0) outFmt.setSampleRate(48000);
+        if (outFmt.channelCount() <= 0) outFmt.setChannelCount(2);
+    }
+
+    QByteArray outPcm;
+    if (outFmt.sampleRate() == static_cast<int>(wavSr) &&
+        outFmt.channelCount() == static_cast<int>(wavCh) &&
+        outFmt.sampleFormat() == QAudioFormat::Int16) {
+        outPcm = wavBytes.mid(dataOff, dataLen);
+    } else {
+        const int inFrames = dataLen / (wavCh * 2);
+        if (inFrames <= 0) return false;
+
+        std::vector<float> left(inFrames, 0.0f);
+        std::vector<float> right(inFrames, 0.0f);
+        const uchar* srcPtr = reinterpret_cast<const uchar*>(wavBytes.constData() + dataOff);
+        for (int i = 0; i < inFrames; ++i) {
+            qint16 sL = qFromLittleEndian<qint16>(srcPtr + (i * wavCh) * 2);
+            qint16 sR = (wavCh >= 2) ? qFromLittleEndian<qint16>(srcPtr + (i * wavCh + 1) * 2) : sL;
+            left[i]  = static_cast<float>(sL) / 32768.0f;
+            right[i] = static_cast<float>(sR) / 32768.0f;
+        }
+
+        const int outSr = qMax(8000, outFmt.sampleRate());
+        const int outCh = qMax(1, outFmt.channelCount());
+        const double ratio = static_cast<double>(wavSr) / static_cast<double>(outSr);
+        const int outFrames = qMax(1, static_cast<int>(std::floor(inFrames / ratio)));
+
+        int outBps = 2;
+        if (outFmt.sampleFormat() == QAudioFormat::Float || outFmt.sampleFormat() == QAudioFormat::Int32) outBps = 4;
+        else if (outFmt.sampleFormat() == QAudioFormat::UInt8) outBps = 1;
+
+        outPcm.resize(outFrames * outCh * outBps);
+        uchar* dstPtr = reinterpret_cast<uchar*>(outPcm.data());
+
+        for (int i = 0; i < outFrames; ++i) {
+            const double srcPos = i * ratio;
+            const int i0 = qMin(static_cast<int>(srcPos), inFrames - 1);
+            const int i1 = qMin(i0 + 1, inFrames - 1);
+            const float frac = static_cast<float>(srcPos - i0);
+            const float vL = qBound(-1.0f, left[i0] * (1.0f - frac) + left[i1] * frac, 1.0f);
+            const float vR = qBound(-1.0f, right[i0] * (1.0f - frac) + right[i1] * frac, 1.0f);
+
+            for (int c = 0; c < outCh; ++c) {
+                const float val = (outCh == 1) ? ((vL + vR) * 0.5f) : ((c == 0) ? vL : vR);
+                uchar* cell = dstPtr + (i * outCh + c) * outBps;
+                if (outFmt.sampleFormat() == QAudioFormat::Int16) {
+                    qToLittleEndian<qint16>(static_cast<qint16>(std::lrint(val * 32767.0f)), cell);
+                } else if (outFmt.sampleFormat() == QAudioFormat::Int32) {
+                    qToLittleEndian<qint32>(static_cast<qint32>(std::llround(static_cast<double>(val) * 2147483647.0)), cell);
+                } else if (outFmt.sampleFormat() == QAudioFormat::Float) {
+                    qToLittleEndian<float>(val, cell);
+                } else if (outFmt.sampleFormat() == QAudioFormat::UInt8) {
+                    *cell = static_cast<uchar>(qBound(0, static_cast<int>(std::lrint((val + 1.0f) * 127.5f)), 255));
+                }
+            }
+        }
+    }
+
+    m_wavBuffer = new QBuffer(this);
+    m_wavBuffer->setData(outPcm);
+    m_wavBuffer->open(QIODevice::ReadOnly);
+
+    m_wavSink = new QAudioSink(outDev, outFmt, this);
+    m_currentVolume = 1.0f;
+    m_wavSink->setVolume(1.0f);
+    // 250 ms donanım tamponu: Wayland compositor veya arka plan yükü altında xrun/kesikliği önler
+    const int bufSz = outFmt.bytesForDuration(250000);
+    if (bufSz > 0) {
+        m_wavSink->setBufferSize(bufSz);
+    }
+
+    connect(m_wavSink, &QAudioSink::stateChanged, this, [this](QAudio::State st) {
+        if (m_state == State::Done || !m_wavSink) return;
+        if (st == QAudio::IdleState || (st == QAudio::StoppedState && m_wavSink->error() != QAudio::NoError)) {
+            QAudioSink* finishedSink = m_wavSink;
+            QBuffer* finishedBuf = m_wavBuffer;
+            m_wavSink = nullptr;
+            m_wavBuffer = nullptr;
+            finishedSink->disconnect(this);
+            finishedSink->stop();
+            finishedSink->deleteLater();
+            if (finishedBuf) {
+                finishedBuf->close();
+                finishedBuf->deleteLater();
+            }
+            Logger::info(QObject::tr("LocalPlaylistPlayer: QAudioSink WAV oynatımı tamamlandı."));
+            advance();
+        }
+    });
+
+    Logger::info(QObject::tr("LocalPlaylistPlayer: Saf QAudioSink ile WAV oynatılıyor → %1 (%2Hz %3ch)")
+                 .arg(path).arg(outFmt.sampleRate()).arg(outFmt.channelCount()));
+    m_wavSink->start(m_wavBuffer);
+    if (m_wavSink->error() != QAudio::NoError) {
+        Logger::warning(QObject::tr("LocalPlaylistPlayer: QAudioSink başlatma hatası (%1), yedek oynatıcıya geçiliyor...")
+                        .arg(static_cast<int>(m_wavSink->error())));
+        m_wavSink->disconnect(this);
+        delete m_wavSink;
+        m_wavSink = nullptr;
+        delete m_wavBuffer;
+        m_wavBuffer = nullptr;
+        return false;
+    }
+
+    return true;
+}
+
 void LocalPlaylistPlayer::playFile(const QString& path) {
+    if (m_state == State::Done) return;
+
     if (!QFile::exists(path) || QFileInfo(path).size() == 0) {
         if (m_isBell && path != m_dingPath && QFile::exists(m_dingPath)) {
             Logger::warning(QObject::tr("LocalPlaylistPlayer: Zil dosyası bozuk veya bulunamadı (%1), yedek ses çalınıyor: %2")
@@ -293,74 +608,114 @@ void LocalPlaylistPlayer::playFile(const QString& path) {
         return;
     }
 
-    m_currentPlayingPath = path;
-    const QString ext = QFileInfo(path).suffix().toLower();
-    const bool isCompressed = (ext == "mp3" || ext == "ogg" || ext == "aac" || ext == "m4a" || ext == "flac");
+    m_currentPlayingPath  = path;
+    m_qtFallbackAllowed   = false;
+    m_qtAlreadyTried      = false;
+    m_qtPlaybackConfirmed = false;
+    stopQtStartWatchdog();
+
+    const QString fmt = detectAudioMagicFormat(path);
+    const qint64 fSize = QFileInfo(path).size();
+    const bool rootNoAudioEnv = isRootWithoutAudioEnv();
+    Logger::info(QObject::tr("LocalPlaylistPlayer: Oynatma hazırlanıyor → %1 (Boyut: %2 KB, Tespit edilen format: %3, Root/DM: %4)")
+                 .arg(path).arg(fSize / 1024).arg(fmt, rootNoAudioEnv ? QObject::tr("Evet") : QObject::tr("Hayır")));
+
+    // X11 DM tray (root, XDG_RUNTIME_DIR yok) ortamında süreç içi Qt ses motorları
+    // PulseAudio/PipeWire'a bağlanamaz; doğrudan aktif ses oturumu bağlamındaki harici oynatıcıya geç.
+    if (rootNoAudioEnv) {
+        playWithExternalFallback(path);
+        return;
+    }
+
+    // 1. ÖNCE SAF Süreç İçi QAudioSink WAV Motorunu dene (Anonslar, dingdong.wav ve gerçek WAV ziller)
+    if (fmt == QLatin1String("wav") && tryPlayWavWithAudioSink(path)) {
+        return;
+    }
+
+    // 2. Sıkıştırılmış yerel zil/ses dosyaları (.mp3, .ogg, .m4a vb.) için ÖNCE süreç içi Qt6 QMediaPlayer dene.
+    //    Böylece Pardus/Debian akıllı tahtalarda PipeWire/PulseAudio varsayılan HDMI çıkışı kullanılır
+    //    ve 55. sn yumuşak sönümleme (fade-out) sorunsuz çalışır.
+    //    QMediaPlayer hata verirse VEYA 2.5 sn içinde fiilen başlamazsa otomatik harici CLI yedeğine geçilir.
+    const bool isCompressed = (fmt == QLatin1String("mp3") || fmt == QLatin1String("ogg") ||
+                               fmt == QLatin1String("aac") || fmt == QLatin1String("m4a") ||
+                               fmt == QLatin1String("flac"));
+    if (isCompressed) {
+        if (QMediaDevices::defaultAudioOutput().isNull()) {
+            Logger::warning(QObject::tr("LocalPlaylistPlayer: Varsayılan Qt ses cihazı bulunamadı, harici oynatıcı yedeğine geçiliyor..."));
+            playWithExternalFallback(path);
+            return;
+        }
+        playWithQt(path, true);
+        return;
+    }
+
+    playWithExternalFallback(path);
+}
+
+void LocalPlaylistPlayer::playWithExternalFallback(const QString& path) {
+    if (m_state == State::Done) return;
+
+    const QString fmt = detectAudioMagicFormat(path);
+    const bool isCompressed = (fmt == QLatin1String("mp3") || fmt == QLatin1String("ogg") ||
+                               fmt == QLatin1String("aac") || fmt == QLatin1String("m4a") ||
+                               fmt == QLatin1String("flac"));
 
     QList<PlayAttempt> attempts;
 
 #if defined(Q_OS_WIN)
-    // Windows 10/11: CLI Oynatıcılar ve Powershell COM Medya Motoru
     if (!QStandardPaths::findExecutable("mpv").isEmpty()) {
         attempts.append({"mpv", {"--no-video", "--really-quiet", path}});
     }
     if (!QStandardPaths::findExecutable("ffplay").isEmpty()) {
         attempts.append({"ffplay", {"-nodisp", "-autoexit", "-loglevel", "quiet", path}});
     }
-
-    // Windows Native PowerShell ile kilitli/login ekranında sorunsuz medya oynatma
-    const QString winPath = QDir::toNativeSeparators(path);
+    // Windows'ta sıkıştırılmış dosyalar için sonsuz döngüye giren PowerShell WMPlayer.OCX KULLANILMAZ;
+    // doğrudan QMediaPlayer (Windows Media Foundation) kullanılır!
     if (!isCompressed) {
-        // WAV formatı için hafif SoundPlayer
+        const QString winPath = QDir::toNativeSeparators(path);
         attempts.append({"powershell.exe", {
             "-ExecutionPolicy", "Bypass", "-NoProfile", "-NonInteractive",
             "-Command", QString("(New-Object Media.SoundPlayer '%1').PlaySync()").arg(winPath)
         }});
-    } else {
-        // MP3 / AAC vb. sıkıştırılmış sesler için yerel Windows Media Player motoru
-        attempts.append({"powershell.exe", {
-            "-ExecutionPolicy", "Bypass", "-NoProfile", "-NonInteractive",
-            "-Command", QString("$w=New-Object -ComObject WMPlayer.OCX;$w.URL='%1';$w.controls.play();while($w.playState -ne 1 -and $w.playState -ne 8 -and $w.playState -ne 10){Start-Sleep -m 200}").arg(winPath)
-        }});
     }
 #else
-    // Linux: Oturum açıkken veya kilit/LightDM ekranındayken ses zinciri
-
-    // 1. PipeWire pw-play (hem WAV hem MP3 destekler)
-    if (!QStandardPaths::findExecutable("pw-play").isEmpty()) {
-        attempts.append({"pw-play", {path}});
-    }
-
-    // 2. mpv (kilit/login ekranında doğrudan ALSA/Pulse oynatır)
     if (!QStandardPaths::findExecutable("mpv").isEmpty()) {
         attempts.append({"mpv", {"--no-video", "--really-quiet", path}});
     }
-
-    // 3. ffplay (ffmpeg yüklüyse kilit ekranında garantili oynatır)
     if (!QStandardPaths::findExecutable("ffplay").isEmpty()) {
         attempts.append({"ffplay", {"-nodisp", "-autoexit", "-loglevel", "quiet", path}});
     }
-
-    // 4. mpg123 (MP3 için en hafif ve doğrudan ALSA/Pulse çalan araç)
-    if (ext == "mp3" && !QStandardPaths::findExecutable("mpg123").isEmpty()) {
+    if (fmt == QLatin1String("mp3") && !QStandardPaths::findExecutable("mpg123").isEmpty()) {
+        // Pardus/Debian akıllı tahtalarda ALSA'nın boş analog çıkışına düşmemesi için önce PulseAudio/PipeWire zorla
+        attempts.append({"mpg123", {"-q", "-o", "pulse", path}});
         attempts.append({"mpg123", {"-q", path}});
     }
-
-    // 5. paplay (Sadece WAV/raw PCM için)
+    if (fmt == QLatin1String("ogg") && !QStandardPaths::findExecutable("ogg123").isEmpty()) {
+        attempts.append({"ogg123", {"-q", "-d", "pulse", path}});
+        attempts.append({"ogg123", {"-q", path}});
+    }
+    if (!QStandardPaths::findExecutable("gst-play-1.0").isEmpty()) {
+        attempts.append({"gst-play-1.0", {"--no-interactive", "--quiet", path}});
+    }
+    if (!isCompressed && !QStandardPaths::findExecutable("pw-play").isEmpty()) {
+        attempts.append({"pw-play", {path}});
+    }
     if (!isCompressed && !QStandardPaths::findExecutable("paplay").isEmpty()) {
         attempts.append({"paplay", {path}});
     }
-
-    // 6. aplay (ALSA doğrudan donanım çıkışı - kilit ekranında ve WAV için hayat kurtarıcı)
     if (!isCompressed && !QStandardPaths::findExecutable("aplay").isEmpty()) {
         attempts.append({"aplay", {path}});
-        attempts.append({"aplay", {"-D", "default", path}});
     }
 #endif
 
     if (attempts.isEmpty()) {
-        Logger::info(QObject::tr("LocalPlaylistPlayer: Harici CLI oynatıcı bulunamadı, QMediaPlayer ile çalınıyor."));
-        playWithQt(path);
+        if (!m_qtAlreadyTried) {
+            Logger::info(QObject::tr("LocalPlaylistPlayer: QMediaPlayer ile çalınıyor → ") + path);
+            playWithQt(path, false);
+        } else {
+            Logger::warning(QObject::tr("LocalPlaylistPlayer: Tüm oynatma yöntemleri tükendi, atlanıyor → ") + path);
+            advance();
+        }
         return;
     }
 
@@ -368,9 +723,16 @@ void LocalPlaylistPlayer::playFile(const QString& path) {
 }
 
 void LocalPlaylistPlayer::tryPlayAttempt(const QList<PlayAttempt>& attempts, int index) {
+    if (m_state == State::Done) return;
+
     if (index >= attempts.size()) {
-        Logger::warning(QObject::tr("LocalPlaylistPlayer: Harici oynatma komutları tükendi, QMediaPlayer'a geçiliyor..."));
-        playWithQt(m_currentPlayingPath);
+        if (!m_qtAlreadyTried) {
+            Logger::warning(QObject::tr("LocalPlaylistPlayer: Harici oynatma komutları tükendi, QMediaPlayer'a geçiliyor..."));
+            playWithQt(m_currentPlayingPath, false);
+        } else {
+            Logger::warning(QObject::tr("LocalPlaylistPlayer: Tüm ses oynatıcılar başarısız oldu → ") + m_currentPlayingPath);
+            advance();
+        }
         return;
     }
 
@@ -381,10 +743,42 @@ void LocalPlaylistPlayer::tryPlayAttempt(const QList<PlayAttempt>& attempts, int
                  .arg(attempt.args.join(" ")));
 
     QProcess* p = new QProcess(this);
-    p->setProcessEnvironment(audioEnv());
+    QProcessEnvironment pEnv = audioEnv();
+    QString launchProg = attempt.program;
+    QStringList launchArgs = attempt.args;
+
+#if !defined(Q_OS_WIN)
+    // Root yetkisiyle (ör. X11 LightDM DM tray) çalışırken PulseAudio/PipeWire soketine
+    // Access Denied yememek için harici oynatıcıyı aktif ses oturumu kullanıcısının UID/GID'siyle çalıştır.
+    if (::geteuid() == 0) {
+        QString audioUser, audioUid, audioGid, audioRunDir;
+        if (resolveLinuxAudioUser(audioUser, audioUid, audioGid, audioRunDir)) {
+            pEnv.insert(QStringLiteral("XDG_RUNTIME_DIR"), audioRunDir);
+            pEnv.insert(QStringLiteral("PULSE_RUNTIME_PATH"), audioRunDir + QStringLiteral("/pulse"));
+            pEnv.insert(QStringLiteral("DBUS_SESSION_BUS_ADDRESS"), QStringLiteral("unix:path=") + audioRunDir + QStringLiteral("/bus"));
+            if (QFile::exists(QStringLiteral("/usr/bin/setpriv"))) {
+                QStringList spArgs = {
+                    QStringLiteral("--reuid=") + audioUid,
+                    QStringLiteral("--regid=") + audioGid
+                };
+                if (::getpwuid(static_cast<uid_t>(audioUid.toUInt())) != nullptr) {
+                    spArgs << QStringLiteral("--init-groups");
+                } else {
+                    spArgs << QStringLiteral("--clear-groups");
+                }
+                spArgs << launchProg << launchArgs;
+                launchProg = QStringLiteral("/usr/bin/setpriv");
+                launchArgs = spArgs;
+            }
+        }
+    }
+#endif
+
+    p->setProcessEnvironment(pEnv);
     m_currentProcess = p;
 
     auto handleFailure = [this, p, attempts, index]() {
+        if (m_state == State::Done) return;
         if (m_currentProcess == p) m_currentProcess = nullptr;
         p->disconnect();
         p->deleteLater();
@@ -393,13 +787,20 @@ void LocalPlaylistPlayer::tryPlayAttempt(const QList<PlayAttempt>& attempts, int
 
     connect(p, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),
             this, [this, p, handleFailure](int exitCode) {
+        if (m_state == State::Done) {
+            p->deleteLater();
+            return;
+        }
         if (m_currentProcess == p) m_currentProcess = nullptr;
         if (exitCode == 0) {
             Logger::info(QObject::tr("LocalPlaylistPlayer: Oynatma başarılı."));
             p->deleteLater();
             advance();
         } else {
-            Logger::warning(QObject::tr("LocalPlaylistPlayer: Süreç sıfır dışı çıkış koduyla bitti (%1).").arg(exitCode));
+            const QString errOut = QString::fromUtf8(p->readAllStandardError()).trimmed();
+            Logger::warning(QObject::tr("LocalPlaylistPlayer: Süreç sıfır dışı çıkış koduyla bitti (%1)%2")
+                            .arg(exitCode)
+                            .arg(errOut.isEmpty() ? QString() : (": " + errOut.left(200))));
             handleFailure();
         }
     });
@@ -409,38 +810,101 @@ void LocalPlaylistPlayer::tryPlayAttempt(const QList<PlayAttempt>& attempts, int
         handleFailure();
     });
 
-    p->start(attempt.program, attempt.args);
+    p->start(launchProg, launchArgs);
 }
 
-void LocalPlaylistPlayer::playWithQt(const QString& path) {
+void LocalPlaylistPlayer::playWithQt(const QString& path, bool allowExternalFallback) {
+    if (m_state == State::Done) return;
+
+    m_qtAlreadyTried      = true;
+    m_qtFallbackAllowed   = allowExternalFallback;
+    m_qtPlaybackConfirmed = false;
+    stopQtStartWatchdog();
+
+    const QAudioDevice defaultOut = QMediaDevices::defaultAudioOutput();
+
     if (!m_qtPlayer) {
         m_qtPlayer = new QMediaPlayer(this);
-        m_qtAudio = new QAudioOutput(this);
+        m_qtAudio = defaultOut.isNull()
+            ? new QAudioOutput(this)
+            : new QAudioOutput(defaultOut, this);
         m_currentVolume = 1.0f;
         m_qtAudio->setVolume(1.0f);
         m_qtAudio->setMuted(false);
         m_qtPlayer->setAudioOutput(m_qtAudio);
 
+        connect(m_qtPlayer, &QMediaPlayer::positionChanged,
+                this, [this](qint64 pos) {
+            if (pos > 0 && !m_qtPlaybackConfirmed) {
+                m_qtPlaybackConfirmed = true;
+                stopQtStartWatchdog();
+            }
+        });
+
         connect(m_qtPlayer, &QMediaPlayer::mediaStatusChanged,
                 this, [this](QMediaPlayer::MediaStatus status) {
+            if (m_state == State::Done) return;
             if (status == QMediaPlayer::EndOfMedia) {
+                stopQtStartWatchdog();
                 Logger::info(QObject::tr("LocalPlaylistPlayer: QMediaPlayer oynatımı tamamlandı."));
                 advance();
+            } else if (status == QMediaPlayer::InvalidMedia) {
+                stopQtStartWatchdog();
+                Logger::warning(QObject::tr("LocalPlaylistPlayer: QMediaPlayer geçersiz medya bildirdi → ") + m_currentPlayingPath);
+                if (m_qtFallbackAllowed) {
+                    m_qtFallbackAllowed = false;
+                    m_qtPlayer->stop();
+                    playWithExternalFallback(m_currentPlayingPath);
+                } else {
+                    advance();
+                }
             }
         });
 
         connect(m_qtPlayer, &QMediaPlayer::errorOccurred,
                 this, [this](QMediaPlayer::Error, const QString& errorString) {
+            if (m_state == State::Done) return;
+            stopQtStartWatchdog();
             Logger::warning(QObject::tr("LocalPlaylistPlayer: QMediaPlayer hatası: ") + errorString);
-            advance();
+            if (m_qtFallbackAllowed) {
+                m_qtFallbackAllowed = false;
+                m_qtPlayer->stop();
+                playWithExternalFallback(m_currentPlayingPath);
+            } else {
+                advance();
+            }
         });
     } else if (m_qtAudio) {
+        if (!defaultOut.isNull()) {
+            m_qtAudio->setDevice(defaultOut);
+        }
         m_currentVolume = 1.0f;
         m_qtAudio->setVolume(1.0f);
         m_qtAudio->setMuted(false);
     }
 
-    Logger::info(QObject::tr("LocalPlaylistPlayer: QMediaPlayer ile oynatılıyor → ") + path);
+    if (allowExternalFallback) {
+        if (!m_qtStartWatchdog) {
+            m_qtStartWatchdog = new QTimer(this);
+            m_qtStartWatchdog->setSingleShot(true);
+            connect(m_qtStartWatchdog, &QTimer::timeout, this, [this]() {
+                if (m_state == State::Done || m_qtPlaybackConfirmed || !m_qtFallbackAllowed) return;
+                Logger::warning(QObject::tr("LocalPlaylistPlayer: QMediaPlayer 2.5 sn içinde oynatmayı başlatamadı (durum: %1, medya: %2), harici oynatıcı yedeğine geçiliyor → %3")
+                                .arg(m_qtPlayer ? static_cast<int>(m_qtPlayer->playbackState()) : -1)
+                                .arg(m_qtPlayer ? static_cast<int>(m_qtPlayer->mediaStatus()) : -1)
+                                .arg(m_currentPlayingPath));
+                m_qtFallbackAllowed = false;
+                if (m_qtPlayer) {
+                    m_qtPlayer->stop();
+                }
+                playWithExternalFallback(m_currentPlayingPath);
+            });
+        }
+        m_qtStartWatchdog->start(2500);
+    }
+
+    Logger::info(QObject::tr("LocalPlaylistPlayer: QMediaPlayer ile oynatılıyor → %1 (Cihaz: %2)")
+                 .arg(path, defaultOut.isNull() ? QObject::tr("Varsayılan") : defaultOut.description()));
     m_qtPlayer->setSource(QUrl::fromLocalFile(path));
     m_qtPlayer->play();
 }
@@ -452,8 +916,7 @@ void LocalPlaylistPlayer::advance() {
     case State::Intro: {
         m_state       = State::Anons;
         m_anonsPlayed = 0;
-        // Açılış ding-dong sesinden sonra anons başlamadan 400ms doğal duraklama
-        QTimer::singleShot(400, this, [this]() {
+        QTimer::singleShot(350, this, [this]() {
             if (m_state != State::Anons) return;
             m_anonsPlayed = 1;
             Logger::info(QObject::tr("LocalPlaylistPlayer: Anons %1/%2")
@@ -465,7 +928,6 @@ void LocalPlaylistPlayer::advance() {
 
     case State::Anons: {
         if (m_isBell) {
-            // Okul Zili: Tek bir saf zil çalınır; ASLA outro dingdong çalınmaz ve zil dosyaları ASLA silinmez!
             m_state = State::Done;
             Logger::info(QObject::tr("LocalPlaylistPlayer: Okul zili sekansı tamamlandı."));
             if (m_maxDurationTimer) m_maxDurationTimer->stop();
@@ -476,11 +938,9 @@ void LocalPlaylistPlayer::advance() {
             return;
         }
 
-        // Yönetici Anonsu: Tekrarlar ve kapanış dingdong işletilir
         if (m_anonsPlayed < m_repeatCount) {
             ++m_anonsPlayed;
-            // Tekrarlanan anonslar arasında 600ms doğal duraklama
-            QTimer::singleShot(600, this, [this]() {
+            QTimer::singleShot(500, this, [this]() {
                 if (m_state != State::Anons) return;
                 Logger::info(QObject::tr("LocalPlaylistPlayer: Anons %1/%2")
                              .arg(m_anonsPlayed).arg(m_repeatCount));
@@ -488,8 +948,7 @@ void LocalPlaylistPlayer::advance() {
             });
         } else {
             m_state = State::Outro;
-            // Kapanış ding-dong sesinden önce 400ms doğal duraklama
-            QTimer::singleShot(400, this, [this]() {
+            QTimer::singleShot(350, this, [this]() {
                 if (m_state != State::Outro) return;
                 Logger::info(QObject::tr("LocalPlaylistPlayer: Kapanış ding-dong çalınıyor..."));
                 playFile(m_dingPath);
@@ -500,8 +959,8 @@ void LocalPlaylistPlayer::advance() {
 
     case State::Outro: {
         m_state = State::Done;
+        if (m_splashWatchdog) m_splashWatchdog->stop();
         Logger::info(QObject::tr("LocalPlaylistPlayer: Anons sekansı tamamlandı."));
-        // Geçici anons dosyasını sil (Linux /tmp veya Windows Temp)
         if (m_anonsPath.startsWith("/tmp/") || m_anonsPath.startsWith(QDir::tempPath())) {
             if (QFile::remove(m_anonsPath))
                 Logger::info(QObject::tr("LocalPlaylistPlayer: Silindi → ") + m_anonsPath);
@@ -523,6 +982,7 @@ void LocalPlaylistPlayer::showSplash() {
         Qt::WindowStaysOnTopHint |
         Qt::Tool);
 
+    m_splash->setWindowTitle(QStringLiteral("Okidia Announcement"));
     m_splash->setFixedSize(340, 100);
     m_splash->setAttribute(Qt::WA_ShowWithoutActivating);
     m_splash->setAttribute(Qt::WA_TranslucentBackground);
@@ -544,10 +1004,11 @@ void LocalPlaylistPlayer::showSplash() {
     lay->setSpacing(6);
 
     auto* row = new QHBoxLayout();
-    row->setSpacing(10);
+    row->setSpacing(12);
 
     auto* ico = new QLabel("", inner);
-    ico->setStyleSheet("font-size:28px; background:transparent;");
+    ico->setPixmap(ThemeManager::icon(":/ui/volume.svg").pixmap(28, 28));
+    ico->setStyleSheet("background:transparent;");
     ico->setFixedWidth(36);
 
     auto* textCol = new QVBoxLayout();
@@ -571,12 +1032,12 @@ void LocalPlaylistPlayer::showSplash() {
 
     m_splash->show();
     m_splash->raise();
-    m_splash->activateWindow();
 }
 
 void LocalPlaylistPlayer::closeSplash() {
     if (m_splash) {
         m_splash->hide();
+        m_splash->close();
         m_splash->deleteLater();
         m_splash = nullptr;
     }

@@ -48,6 +48,16 @@ bool FileSender::sendToAll(const QString& filePath,
                          overrideFilename);
 }
 
+void FileSender::cancel() {
+    if (m_timer && m_timer->isActive()) {
+        m_timer->stop();
+    }
+    if (m_file.isOpen()) {
+        m_file.close();
+    }
+    Logger::info(QObject::tr("FileSender: Transfer iptal edildi (seqId=%1)").arg(m_sequenceId));
+}
+
 bool FileSender::startTransfer(const QString& filePath,
                                 const QString& targetId,
                                 uint64_t sequenceId,

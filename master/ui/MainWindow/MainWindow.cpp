@@ -13,6 +13,7 @@
 #include "../ChatWindow/ChatWindow.h"
 #include "../BroadcastOverlay/BroadcastOverlayWidget.h"
 #include "../Widgets/MasterUpdateDialog.h"
+#include "../CustomProfilesDialog/CustomProfilesDialog.h"
 #include "../../session/SessionManager.h"
 #include <utils/Logger.h>
 
@@ -107,6 +108,15 @@ MainWindow::MainWindow(SessionManager* session, QWidget* parent)
             ui->btnStreamToggle->setToolTip(tr("Ekran Akışını Duraklat"));
         }
         if (m_session) m_session->setUserFpsInterval(savedInterval);
+    }
+    if (ui->btnRefreshThumbnails) {
+        ui->btnRefreshThumbnails->setIcon(ThemeManager::icon(":/ui/refresh.svg"));
+        ui->btnRefreshThumbnails->setToolTip(tr("Görünür İstemcilerin Ekran Görüntülerini Yenile"));
+        connect(&ThemeManager::instance(), &ThemeManager::themeChanged, this, [this]() {
+            if (ui->btnRefreshThumbnails) {
+                ui->btnRefreshThumbnails->setIcon(ThemeManager::icon(":/ui/refresh.svg"));
+            }
+        });
     }
 
     setupConnections();
@@ -245,8 +255,28 @@ MainWindow::MainWindow(SessionManager* session, QWidget* parent)
 
     connect(m_session, &SessionManager::offlineLoginFailed, this, [this](const QString& reason) {
         Logger::warning(QObject::tr("MainWindow: Arka planda sunucu girişi yapılamadı: ") + reason);
-        statusBar()->showMessage(tr("Arka plan sunucu bağlantısı kurulamadı: %1").arg(reason), 5000);
+        const QString errText = reason.isEmpty() ? tr("Kullanıcı adı veya şifre doğrulanamadı.") : reason;
+        statusBar()->showMessage(tr("Sunucuya yeniden giriş yapılamadı: %1").arg(errText), 8000);
         applyOfflineModeConstraints(true);
+
+        static bool s_reloginPromptOpen = false;
+        if (s_reloginPromptOpen) return;
+        s_reloginPromptOpen = true;
+
+        QMessageBox msgBox(this);
+        msgBox.setIcon(QMessageBox::Warning);
+        msgBox.setWindowTitle(tr("Yeniden Giriş Gerekli"));
+        msgBox.setText(tr("Sunucu bağlantısı yeniden kuruldu ancak otomatik oturum doğrulaması başarısız oldu."));
+        msgBox.setInformativeText(tr("Neden: %1\n\nÇevrimiçi yönetime devam etmek için giriş ekranına dönmek ister misiniz?").arg(errText));
+        QPushButton* btnRelogin = msgBox.addButton(tr("Yeniden Giriş Yap"), QMessageBox::AcceptRole);
+        msgBox.addButton(tr("Çevrimdışı (SSH) Modda Kal"), QMessageBox::RejectRole);
+        msgBox.setDefaultButton(btnRelogin);
+        msgBox.exec();
+
+        s_reloginPromptOpen = false;
+        if (msgBox.clickedButton() == btnRelogin) {
+            emit logoutRequested();
+        }
     });
 
     connect(m_session, &SessionManager::kickedToOfflineMode, this, [this]() {
@@ -1050,6 +1080,11 @@ void MainWindow::setupDock() {
             this, &MainWindow::showDiscoveryPanel);
     connect(m_deployPanel, &DeployPanel::manageClientsRequested,
             this, &MainWindow::onManageClients);
+    connect(m_deployPanel, &DeployPanel::manageCustomProfilesRequested,
+            this, [this]() {
+        CustomProfilesDialog dlg(m_session, m_sysMgmtWindow ? static_cast<QWidget*>(m_sysMgmtWindow) : static_cast<QWidget*>(this));
+        dlg.exec();
+    });
     connect(m_deployPanel, &DeployPanel::agentInstalledOn,
             [this](const QString& ip, const QString& hostname) {
         showCommandStatus(true, tr("İstemci kuruldu → ") + hostname + " (" + ip + ")");
@@ -1632,12 +1667,20 @@ void MainWindow::applyOfflineModeConstraints(bool offline) {
     if (ui->btnChat)        { ui->btnChat->setVisible(true);        ui->btnChat->setEnabled(!offline); }
     if (ui->btnReport)      { ui->btnReport->setVisible(true);      ui->btnReport->setEnabled(!offline); }
 
-    // Eğer offline moda girdiyse Sistem & Ağ Yönetimi penceresini otomatik aç ve DeployPanel veya SshManagerPanel'i öne çıkar
+    // Eğer offline moda girdiyse Sistem & Ağ Yönetimi penceresini otomatik aç ve DeployPanel veya SshManagerPanel'i öne çıkar.
+    // Ancak pencere zaten açıksa ve kullanıcı OTA (Sistem Güncelleme) veya SSH sekmesindeyse (ör. Broker OTA yeniden başlatması),
+    // aktif sekmeyi zorla değiştirme.
     if (offline) {
-        if (m_deployPanel && m_sysMgmtTabs && m_sysMgmtTabs->indexOf(m_deployPanel) != -1) {
-            showSystemManagementWindow(m_deployPanel);
-        } else if (m_sshManagerPanel && m_sysMgmtTabs && m_sysMgmtTabs->indexOf(m_sshManagerPanel) != -1) {
-            showSystemManagementWindow(m_sshManagerPanel);
+        QWidget* currentSysTab = (m_sysMgmtWindow && m_sysMgmtWindow->isVisible() && m_sysMgmtTabs)
+                                     ? m_sysMgmtTabs->currentWidget()
+                                     : nullptr;
+        const bool preserveActiveTab = (currentSysTab && (currentSysTab == m_otaUpdatePanel || currentSysTab == m_sshManagerPanel));
+        if (!preserveActiveTab) {
+            if (m_deployPanel && m_sysMgmtTabs && m_sysMgmtTabs->indexOf(m_deployPanel) != -1) {
+                showSystemManagementWindow(m_deployPanel);
+            } else if (m_sshManagerPanel && m_sysMgmtTabs && m_sysMgmtTabs->indexOf(m_sshManagerPanel) != -1) {
+                showSystemManagementWindow(m_sshManagerPanel);
+            }
         }
     }
 }

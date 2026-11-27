@@ -3,6 +3,7 @@
 #include "AgentDiscoveryCoordinator.h"
 #include "LocalScheduleWatchdog.h"
 #include "../network/DiscoveryService.h"
+#include "../input/EvdevController.h"
 #include "../system/SystemInfo.h"
 #include "../system/PersistentStateManager.h"
 #include "../web/WebFilter.h"
@@ -22,6 +23,7 @@
 #include <QFile>
 #include <QFileInfo>
 #include <QJsonObject>
+#include <QRegularExpression>
 #include <QSet>
 #include <QTextStream>
 #if defined(Q_OS_WIN)
@@ -29,13 +31,17 @@
 #    define WIN32_LEAN_AND_MEAN
 #  endif
 #  include <windows.h>
+#  include <wtsapi32.h>
 #  include <QSslSocket>
+#else
+#  include <pwd.h>
 #endif
 
 AgentApp::AgentApp(QObject* parent) : QObject(parent) {
 }
 
 AgentApp::~AgentApp() {
+    stopInputHelper();
 #if defined(Q_OS_WIN)
     if (m_hUserTrayWait) {
         UnregisterWait(reinterpret_cast<HANDLE>(m_hUserTrayWait));
@@ -88,6 +94,11 @@ bool AgentApp::isUiMessage(okidia::MessageType t) {
     case okidia::MessageType::MSG_BROADCAST:
     case okidia::MessageType::APP_LIST_REQUEST:
     case okidia::MessageType::APP_CLOSE:
+    case okidia::MessageType::APP_BLOCK_BYNAME:
+    case okidia::MessageType::APP_BLOCK_BYHASH:
+    case okidia::MessageType::APP_WHITELIST_SET:
+    case okidia::MessageType::APP_BLOCK_LIST:
+    case okidia::MessageType::APP_UNBLOCK:
     case okidia::MessageType::CHAT_MESSAGE:
     case okidia::MessageType::CHAT_LIST_RESPONSE:
     case okidia::MessageType::CHAT_INVITE:
@@ -96,6 +107,7 @@ bool AgentApp::isUiMessage(okidia::MessageType t) {
     case okidia::MessageType::CHAT_MEMBER_JOINED:
     case okidia::MessageType::CHAT_MEMBER_LEFT:
     case okidia::MessageType::CHAT_LOCK_STATE:
+    case okidia::MessageType::CHAT_MUTE_STATE:
     case okidia::MessageType::PRIVATE_CHAT_REQUEST:
     case okidia::MessageType::PRIVATE_CHAT_ACCEPT:
     case okidia::MessageType::PRIVATE_CHAT_REJECT:
@@ -123,10 +135,22 @@ bool AgentApp::init() {
     qunsetenv("QT_QPA_PLATFORM");
     QLocale::setDefault(QLocale::c());
 
+    const QString appDir = QCoreApplication::applicationDirPath();
+    if (!appDir.isEmpty()) {
+        QCoreApplication::addLibraryPath(appDir);
+        QCoreApplication::addLibraryPath(appDir + QStringLiteral("/tls"));
+    }
+
     QSslSocket::setActiveBackend(QStringLiteral("openssl"));
     Logger::info(QObject::tr("Agent: TLS Backend → %1 (Kütüphane: %2)")
                  .arg(QSslSocket::activeBackend())
                  .arg(QSslSocket::sslLibraryVersionString()));
+    if (!QSslSocket::supportsSsl()) {
+        Logger::error(QObject::tr("Agent: KRİTİK! Qt TLS desteği aktif değil (OpenSSL 3.x DLL'leri eksik veya uyumsuz: libssl-3-x64.dll / libcrypto-3-x64.dll). Mevcut backendler: %1")
+                      .arg(QSslSocket::availableBackends().join(", ")));
+    }
+
+    SystemInfo::applyWindowsUnattendedPolicies();
 #endif
 
     m_tls = new TlsClient(this);
@@ -184,6 +208,9 @@ bool AgentApp::init() {
 
     connect(m_ipcServer, &AgentIpcServer::agentTypeUpdated, this, [this](int newType) {
         m_agentType = newType;
+    });
+    connect(m_ipcServer, &AgentIpcServer::activeTrayReady, this, [this](LocalConnection*, const QString&) {
+        flushPendingAudioToActiveTray();
     });
 
     m_webFilter = new WebFilter(this);
@@ -297,6 +324,7 @@ void AgentApp::sendClientInfo(const QString& username, uint32_t w, uint32_t h) {
     ci.set_os_arch(stats.osArch.toStdString());
     ci.set_agent_type(static_cast<uint32_t>(m_agentType));
     ci.set_rtc_battery_low(m_rtcBatteryLow);
+    ci.set_assets_fingerprint(OkidiaConfig::computeAssetsFingerprint().toStdString());
 
     okidia::Envelope env;
     env.set_type(okidia::MessageType::CLIENT_INFO);
@@ -479,9 +507,19 @@ void AgentApp::onBrokerEnvelopeReceived(Connection* conn, const okidia::Envelope
         if (req.ParseFromString(env.payload())) {
             okidia::LogTailResponse resp;
             resp.set_success(true);
-            QString targetFile = QString::fromStdString(req.target_file());
+            QString targetFile = QFileInfo(QString::fromStdString(req.target_file())).fileName();
             QString logDir = Logger::logDir();
-            QString fullPath = targetFile.isEmpty() ? Logger::logFilePath() : (logDir + "/" + targetFile);
+            QString fullPath;
+            if (targetFile.isEmpty()) {
+                fullPath = Logger::logFilePath();
+            } else if (QFile::exists(logDir + "/" + targetFile)) {
+                fullPath = logDir + "/" + targetFile;
+            } else if (targetFile.startsWith("okidia-tray-") && targetFile.endsWith(".log") &&
+                       QFile::exists(QDir::tempPath() + "/" + targetFile)) {
+                fullPath = QDir::tempPath() + "/" + targetFile;
+            } else {
+                fullPath = logDir + "/" + targetFile;
+            }
             
             QFileInfo fi(fullPath);
             if (fi.exists()) {
@@ -519,9 +557,19 @@ void AgentApp::onBrokerEnvelopeReceived(Connection* conn, const okidia::Envelope
                 resp.set_error_message(QObject::tr("Log dosyası bulunamadı: %1").arg(targetFile).toStdString());
             }
 
+            QSet<QString> addedLogNames;
             auto fileList = Logger::availableLogFiles(logDir);
             for (const auto& f : fileList) {
+                addedLogNames.insert(f.fileName);
                 resp.add_available_files(f.fileName.toStdString());
+            }
+            // Linux'ta standart kullanıcı yetkisiyle /tmp altına düşen okidia-tray-*.log dosyalarını da listele
+            QDir tmpDir(QDir::tempPath());
+            for (const QFileInfo& tfi : tmpDir.entryInfoList(QStringList() << "okidia-tray-*.log", QDir::Files, QDir::Time)) {
+                if (!addedLogNames.contains(tfi.fileName())) {
+                    addedLogNames.insert(tfi.fileName());
+                    resp.add_available_files(tfi.fileName().toStdString());
+                }
             }
 
             okidia::Envelope re;
@@ -563,8 +611,12 @@ void AgentApp::onBrokerEnvelopeReceived(Connection* conn, const okidia::Envelope
     if (env.type() == okidia::MessageType::INPUT_TAKE_CONTROL) {
         m_ipcServer->setRemoteControlActive(true);
         m_ipcServer->setLastTakeControlEnv(env);
+        if (m_currentIpcTarget != QStringLiteral("winlogon")) {
+            startInputHelper();
+        }
     } else if (env.type() == okidia::MessageType::REMOTE_CONTROL_STOP) {
         m_ipcServer->clearRemoteControlEnv();
+        stopInputHelper();
     } else if (env.type() == okidia::MessageType::SCREEN_FPS_SET) {
         m_ipcServer->setLastFpsSetEnv(env);
         Logger::info(QObject::tr("Agent: SCREEN_FPS_SET komutu alındı, aktif Tray'e iletiliyor."));
@@ -585,6 +637,12 @@ void AgentApp::onBrokerEnvelopeReceived(Connection* conn, const okidia::Envelope
                     QSettings s("okidia", "agent");
                     s.setValue("smartboard/lockPolicy", cmd.lock_policy());
                 }
+                // Standart perde kilidinde (Öğrenci PC veya zorunlu normal perde policy=1)
+                // Wayland üzerinde Super/Alt+Tab kaçışını donanım seviyesinde (evdev) engelle
+                const bool isQrSmartboard = (m_agentType == 3 && cmd.lock_policy() != 1);
+                if (!isQrSmartboard && m_agentType != 2 && EvdevController::isWaylandSessionActive()) {
+                    EvdevController::instance().lockInput();
+                }
             } else if (cmd.lock_policy() == 3) {
                 Logger::info(QObject::tr("Agent: Teneffüs öğrenci oturum kapatma (lock_policy=3) geçici eylem olarak işlendi, kalıcı kilit yazılmadı."));
             } else {
@@ -593,10 +651,59 @@ void AgentApp::onBrokerEnvelopeReceived(Connection* conn, const okidia::Envelope
         }
     } else if (env.type() == okidia::MessageType::SCREEN_UNLOCK) {
         PersistentStateManager::clearScreenLock();
+        if (EvdevController::instance().isInputLocked()) {
+            EvdevController::instance().unlockInput();
+        }
     } else if (env.type() == okidia::MessageType::INPUT_LOCK) {
         PersistentStateManager::setInputLock();
+        if (EvdevController::isWaylandSessionActive()) {
+            EvdevController::instance().lockInput();
+        }
     } else if (env.type() == okidia::MessageType::INPUT_UNLOCK) {
         PersistentStateManager::clearInputLock();
+        if (EvdevController::instance().isInputLocked()) {
+            EvdevController::instance().unlockInput();
+        }
+    } else if (env.type() == okidia::MessageType::INPUT_TAKE_CONTROL) {
+        if (EvdevController::instance().isInputLocked()) {
+            EvdevController::instance().unlockInput();
+        }
+    } else if (env.type() == okidia::MessageType::MOUSE_EVENT) {
+        if (EvdevController::isWaylandSessionActive()) {
+            okidia::MouseEvent evt;
+            if (evt.ParseFromString(env.payload())) {
+                int w = static_cast<int>(m_ipcServer->lastKnownScreenW());
+                int h = static_cast<int>(m_ipcServer->lastKnownScreenH());
+                if (w <= 0) w = 1920;
+                if (h <= 0) h = 1080;
+                if (evt.is_move()) {
+                    EvdevController::instance().injectMouseMove(evt.x(), evt.y(), w, h);
+                } else if (evt.is_scroll()) {
+                    EvdevController::instance().injectMouseScroll(evt.delta());
+                } else {
+                    EvdevController::instance().injectMouseClick(evt.button(), evt.pressed(), evt.x(), evt.y(), w, h);
+                }
+            }
+            return;
+        }
+#if defined(Q_OS_WIN)
+        if (m_currentIpcTarget != QStringLiteral("winlogon") && m_ipcServer->sendToInputHelper(env)) {
+            return;
+        }
+#endif
+    } else if (env.type() == okidia::MessageType::KEY_EVENT) {
+        if (EvdevController::isWaylandSessionActive()) {
+            okidia::KeyEvent evt;
+            if (evt.ParseFromString(env.payload())) {
+                EvdevController::instance().injectKeyEvent(evt.keysym(), evt.pressed());
+            }
+            return;
+        }
+#if defined(Q_OS_WIN)
+        if (m_currentIpcTarget != QStringLiteral("winlogon") && m_ipcServer->sendToInputHelper(env)) {
+            return;
+        }
+#endif
     } else if (env.type() == okidia::MessageType::WEB_BLOCK_ALL) {
         okidia::WebFilterCommand cmd;
         if (cmd.ParseFromString(env.payload())) {
@@ -723,19 +830,134 @@ void AgentApp::onBrokerEnvelopeReceived(Connection* conn, const okidia::Envelope
         break;
     }
     case okidia::MessageType::POWER_LOGOUT: {
+        SessionSwitchManager::instance().cleanupAutologinConfig();
+        m_logoutInProgressUntil = QDateTime::currentSecsSinceEpoch() + 6;
 #if defined(Q_OS_WIN)
-        auto pCmd = OkidiaUtils::localPowerCommand(OkidiaUtils::PowerAction::Logout);
-        QProcess::startDetached(pCmd.first, pCmd.second);
-#else
-        const QString active = m_ipcServer->server() ? m_ipcServer->server()->activeUser() : QString();
-        if (!active.isEmpty() && !SystemInfo::isDmUser(active)) {
-            QProcess p;
-            p.start("loginctl", {"terminate-user", active});
-            p.waitForFinished(3000);
-        } else {
-            auto pCmd = OkidiaUtils::localPowerCommand(OkidiaUtils::PowerAction::Logout);
-            QProcess::startDetached(pCmd.first, pCmd.second);
+        // Windows: Servis (SYSTEM) bağlamında doğrudan aktif konsol oturumunu zorla kapat.
+        // shutdown.exe /l Session 0'da ve kilitli Winlogon ekranında çalışmaz; WTSLogoffSession kesin çözümdür.
+        DWORD activeSessId = WTSGetActiveConsoleSessionId();
+        if (activeSessId != 0xFFFFFFFF && activeSessId != 0) {
+            if (WTSLogoffSession(WTS_CURRENT_SERVER_HANDLE, activeSessId, FALSE)) {
+                Logger::info(QObject::tr("Agent: Windows konsol oturumu (Session %1) WTSLogoffSession ile kapatıldı.").arg(activeSessId));
+            } else {
+                Logger::warning(QObject::tr("Agent: WTSLogoffSession başarısız (Hata: %1), aktif tray'e POWER_LOGOUT iletiliyor.").arg(GetLastError()));
+                if (m_ipcServer->server() && m_ipcServer->server()->clientCount() > 0) {
+                    m_ipcServer->sendToActive(env);
+                }
+            }
+        } else if (m_ipcServer->server() && m_ipcServer->server()->clientCount() > 0) {
+            m_ipcServer->sendToActive(env);
         }
+#else
+        QString active = m_ipcServer->server() ? m_ipcServer->server()->activeUser() : QString();
+        if (active.isEmpty() || SystemInfo::isDmUser(active)) {
+            active = SystemInfo::activeDisplayUser();
+        }
+        if (active.isEmpty() || SystemInfo::isDmUser(active) || active == QLatin1String("root")) {
+            Logger::info(QObject::tr("Agent: Giriş ekranı (Display Manager: %1) aktif, POWER_LOGOUT yoksayıldı.").arg(active));
+            break;
+        }
+
+        Logger::info(QObject::tr("Agent: Oturum kapatma komutu işleniyor → kullanıcı: %1").arg(active));
+
+        // 1. Aşama: Bağlı kullanıcı Tray'ine POWER_LOGOUT gönder (masaüstü ortamına özgü --force --no-prompt çıkışı tetikler)
+        if (m_ipcServer->server() && m_ipcServer->server()->clientCount() > 0) {
+            m_ipcServer->sendToActive(env);
+        }
+
+        // Aktif grafik oturumunun (seat0 ActiveSession veya X11/Wayland GUI session) ID'sini tespit et
+        auto findGuiSessionId = [](const QString& targetUser) -> QString {
+            QProcess pSeat;
+            pSeat.start(QStringLiteral("loginctl"),
+                        {QStringLiteral("show-seat"), QStringLiteral("seat0"),
+                         QStringLiteral("--property=ActiveSession"), QStringLiteral("--value")});
+            if (pSeat.waitForFinished(400) && pSeat.exitCode() == 0) {
+                const QString sid = QString::fromLatin1(pSeat.readAllStandardOutput()).trimmed();
+                if (!sid.isEmpty() && sid != QLatin1String("0") && sid != QLatin1String("(null)")) {
+                    QProcess pName;
+                    pName.start(QStringLiteral("loginctl"),
+                                {QStringLiteral("show-session"), sid,
+                                 QStringLiteral("--property=Name"), QStringLiteral("--value")});
+                    if (pName.waitForFinished(400) && pName.exitCode() == 0) {
+                        const QString sUser = QString::fromLatin1(pName.readAllStandardOutput()).trimmed();
+                        if (sUser == targetUser) {
+                            return sid;
+                        }
+                    }
+                }
+            }
+
+            QProcess pList;
+            pList.start(QStringLiteral("loginctl"), {QStringLiteral("list-sessions"), QStringLiteral("--no-legend")});
+            if (pList.waitForFinished(400) && pList.exitCode() == 0) {
+                const QStringList lines = QString::fromLatin1(pList.readAllStandardOutput()).split('\n', Qt::SkipEmptyParts);
+                QString fallbackSid;
+                for (const QString& line : lines) {
+                    const QStringList parts = line.split(QRegularExpression(QStringLiteral("\\s+")), Qt::SkipEmptyParts);
+                    if (parts.size() >= 3 && parts[2] == targetUser) {
+                        const QString candSid = parts[0];
+                        if (fallbackSid.isEmpty()) fallbackSid = candSid;
+                        QProcess pType;
+                        pType.start(QStringLiteral("loginctl"),
+                                    {QStringLiteral("show-session"), candSid,
+                                     QStringLiteral("--property=Type"),
+                                     QStringLiteral("--property=Class")});
+                        if (pType.waitForFinished(300) && pType.exitCode() == 0) {
+                            const QString out = QString::fromLatin1(pType.readAllStandardOutput());
+                            if ((out.contains(QStringLiteral("Type=x11")) || out.contains(QStringLiteral("Type=wayland"))) &&
+                                out.contains(QStringLiteral("Class=user"))) {
+                                return candSid;
+                            }
+                        }
+                    }
+                }
+                if (!fallbackSid.isEmpty()) return fallbackSid;
+            }
+            return QString();
+        };
+
+        const QString guiSessionId = findGuiSessionId(active);
+
+        // 2. Aşama (800 ms sonra): Masaüstü oturumu hala kapanmadıysa oturum yöneticilerine SIGTERM gönder ve
+        // terminate-user yerine doğrudan grafik oturumunu (terminate-session) sonlandır.
+        QTimer::singleShot(800, this, [active, guiSessionId, findGuiSessionId]() {
+            const QString curActive = SystemInfo::activeDisplayUser();
+            if (curActive != active) return; // Oturum zaten temizce kapandı
+
+            Logger::info(QObject::tr("Agent: Grafik oturumu (kullanıcı: %1, oturum: %2) sonlandırılıyor (terminate-session)...")
+                         .arg(active, guiSessionId.isEmpty() ? QStringLiteral("auto") : guiSessionId));
+
+            QProcess::startDetached(QStringLiteral("pkill"),
+                                    {QStringLiteral("-SIGTERM"), QStringLiteral("-u"), active,
+                                     QStringLiteral("-f"),
+                                     QStringLiteral("cinnamon-session|gnome-session|budgie-session|xfce4-session|mate-session|ksmserver|plasma_session|lxqt-session|lxsession")});
+
+            const QString sid = guiSessionId.isEmpty() ? findGuiSessionId(active) : guiSessionId;
+            if (!sid.isEmpty()) {
+                QProcess::startDetached(QStringLiteral("loginctl"), {QStringLiteral("terminate-session"), sid});
+            } else {
+                QProcess::startDetached(QStringLiteral("loginctl"), {QStringLiteral("terminate-user"), active});
+            }
+        });
+
+        // 3. Aşama (1800 ms sonra): Cinnamon / GNOME end-session-dialog D-Bus zaman aşımı (30 sn) yüzünden
+        // oturum hala asılı kaldıysa kill-session --signal=SIGKILL ile anında Display Manager'a düşür.
+        QTimer::singleShot(1800, this, [active, guiSessionId, findGuiSessionId]() {
+            const QString curActive = SystemInfo::activeDisplayUser();
+            if (curActive != active) return; // Oturum kapandı
+
+            const QString sid = guiSessionId.isEmpty() ? findGuiSessionId(active) : guiSessionId;
+            Logger::warning(QObject::tr("Agent: Grafik oturumu (%1, oturum: %2) D-Bus/inhibit nedeniyle gecikti, zorla sonlandırılıyor (SIGKILL)...")
+                            .arg(active, sid.isEmpty() ? QStringLiteral("user") : sid));
+
+            if (!sid.isEmpty()) {
+                QProcess::startDetached(QStringLiteral("loginctl"),
+                                        {QStringLiteral("kill-session"), sid, QStringLiteral("--signal=SIGKILL")});
+            } else {
+                QProcess::startDetached(QStringLiteral("loginctl"),
+                                        {QStringLiteral("kill-user"), active, QStringLiteral("--signal=SIGKILL")});
+            }
+        });
 #endif
         break;
     }
@@ -744,11 +966,6 @@ void AgentApp::onBrokerEnvelopeReceived(Connection* conn, const okidia::Envelope
         QProcess::startDetached(pCmd.first, pCmd.second);
         break;
     }
-    case okidia::MessageType::APP_BLOCK_BYNAME:
-    case okidia::MessageType::APP_BLOCK_BYHASH:
-    case okidia::MessageType::APP_WHITELIST_SET:
-    case okidia::MessageType::APP_UNBLOCK:
-        break;
     case okidia::MessageType::WEB_BLOCK_ALL:
     case okidia::MessageType::WEB_UNBLOCK:
         m_webFilter->handleEnvelope(env);
@@ -809,26 +1026,54 @@ void AgentApp::onBrokerEnvelopeReceived(Connection* conn, const okidia::Envelope
         QFile::remove(OkidiaConfig::agentCertDir() + "/agent.csr");
 #if defined(Q_OS_WIN)
         {
+            // Servis kendini kapatırken Windows SCM'in kurtarma/restart mekanizmasının
+            // servisi yeniden diriltmesini engelle.
+            QProcess::execute(QStringLiteral("sc.exe"), {QStringLiteral("failure"), QStringLiteral("OkidiaAgent"), QStringLiteral("reset="), QStringLiteral("0"), QStringLiteral("actions="), QString()});
+            QProcess::execute(QStringLiteral("sc.exe"), {QStringLiteral("config"), QStringLiteral("OkidiaAgent"), QStringLiteral("start="), QStringLiteral("disabled")});
+
             QString uPath = QDir::cleanPath(QCoreApplication::applicationDirPath() + "/../unins000.exe");
             if (!QFile::exists(uPath)) {
-                uPath = "C:\\Program Files\\Okidia\\unins000.exe";
+                uPath = QStringLiteral("C:/Program Files/Okidia/Agent/unins000.exe");
+            }
+            if (!QFile::exists(uPath)) {
+                uPath = QStringLiteral("C:/Program Files/Okidia/unins000.exe");
             }
             uPath = QDir::toNativeSeparators(uPath);
             Logger::info(QObject::tr("Agent: Uninstaller başlatılıyor → ") + uPath);
-            
+
             QString keyArg;
-            QString keyFile = OkidiaConfig::systemBasePath() + "/Agent/uninstall.key";
+            const QString keyFile = OkidiaConfig::systemBasePath() + "/Agent/uninstall.key";
             QFile kf(keyFile);
             if (kf.open(QIODevice::ReadOnly)) {
-                QString hash = QString::fromUtf8(kf.readAll()).trimmed();
+                const QString hash = QString::fromUtf8(kf.readAll()).trimmed();
                 if (!hash.isEmpty()) {
                     keyArg = QString(" /UNINSTALLKEY=\"%1\"").arg(hash);
                 }
                 kf.close();
             }
 
-            QString uninsCmd = QString("timeout /t 2 /nobreak >nul & \"%1\" /VERYSILENT /SUPPRESSMSGBOXES /NORESTART%2").arg(uPath, keyArg);
-            QProcess::startDetached("cmd.exe", QStringList() << "/c" << "start" << "cmd.exe" << "/c" << uninsCmd);
+            QString cmdLine = QString("\"%1\" /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /LOG=\"C:\\Windows\\Temp\\okidia_uninstall.log\"%2")
+                                  .arg(uPath, keyArg);
+            std::wstring wCmd = cmdLine.toStdWString();
+
+            STARTUPINFOW si = {};
+            si.cb = sizeof(si);
+            PROCESS_INFORMATION pi = {};
+            DWORD flags = DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_BREAKAWAY_FROM_JOB;
+
+            BOOL launched = CreateProcessW(nullptr, &wCmd[0], nullptr, nullptr, FALSE, flags, nullptr, L"C:\\Windows\\Temp", &si, &pi);
+            if (!launched && GetLastError() == ERROR_ACCESS_DENIED) {
+                flags = DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP;
+                launched = CreateProcessW(nullptr, &wCmd[0], nullptr, nullptr, FALSE, flags, nullptr, L"C:\\Windows\\Temp", &si, &pi);
+            }
+
+            if (launched) {
+                CloseHandle(pi.hThread);
+                CloseHandle(pi.hProcess);
+                Logger::info(QObject::tr("Agent: Windows uninstaller süreci bağımsız olarak başlatıldı."));
+            } else {
+                Logger::error(QObject::tr("Agent: Windows uninstaller başlatılamadı (Win32 hata=%1).").arg(GetLastError()));
+            }
         }
 #else
         QString uninsCmd = "sleep 1; systemctl stop okidia-agent 2>/dev/null; DEBIAN_FRONTEND=noninteractive apt-get purge -y okidia-agent";
@@ -868,6 +1113,7 @@ void AgentApp::onBrokerEnvelopeReceived(Connection* conn, const okidia::Envelope
     }
     case okidia::MessageType::AGENT_TYPE_SET: {
         Logger::info(QObject::tr("Agent: Tip atama isteği alındı → Tray'e iletiliyor"));
+        m_ipcServer->setLastAgentTypeEnv(env);
         m_ipcServer->sendToActive(env);
         break;
     }
@@ -1090,8 +1336,27 @@ void AgentApp::onBrokerEnvelopeReceived(Connection* conn, const okidia::Envelope
                 m_ipcServer->clearExamEnv();
             }
 
-            if (env.type() == okidia::MessageType::SCREEN_UNLOCK ||
-                env.type() == okidia::MessageType::INPUT_UNLOCK) {
+            if (env.type() == okidia::MessageType::AUDIO_PLAY_LOCAL) {
+                LocalConnection* exactActive = m_ipcServer->server() ? m_ipcServer->server()->exactActiveConnection() : nullptr;
+                if (exactActive && exactActive->isConnected()) {
+                    exactActive->sendEnvelope(env);
+                } else {
+                    const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
+                    while (m_pendingAudioQueue.size() >= 4) {
+                        m_pendingAudioQueue.removeFirst();
+                    }
+                    m_pendingAudioQueue.append({env, nowMs + 12000});
+                    Logger::warning(QObject::tr("Agent: Aktif oturum tray'i henüz hazır değil, yerel ses/zil komutu 12 sn bekletme kuyruğuna alındı."));
+                    QTimer::singleShot(200, this, &AgentApp::checkSession);
+                }
+            } else if (env.type() == okidia::MessageType::SCREEN_UNLOCK ||
+                env.type() == okidia::MessageType::INPUT_UNLOCK ||
+                env.type() == okidia::MessageType::AUDIO_STOP ||
+                env.type() == okidia::MessageType::AUDIO_BROADCAST_STOP) {
+                if (env.type() == okidia::MessageType::AUDIO_STOP ||
+                    env.type() == okidia::MessageType::AUDIO_BROADCAST_STOP) {
+                    m_pendingAudioQueue.clear();
+                }
                 m_ipcServer->broadcast(env);
             } else if (m_ipcServer->server() && m_ipcServer->server()->clientCount() > 0) {
                 m_ipcServer->sendToActive(env);
@@ -1109,11 +1374,99 @@ void AgentApp::onBrokerEnvelopeReceived(Connection* conn, const okidia::Envelope
     }
 }
 
+void AgentApp::startInputHelper() {
+#if defined(Q_OS_WIN)
+    if (m_hInputHelperProc) {
+        DWORD waitRes = WaitForSingleObject(reinterpret_cast<HANDLE>(m_hInputHelperProc), 0);
+        if (waitRes == WAIT_TIMEOUT) {
+            return; // Zaten çalışıyor
+        }
+        CloseHandle(reinterpret_cast<HANDLE>(m_hInputHelperProc));
+        m_hInputHelperProc = nullptr;
+    }
+
+    QString agentPath = QCoreApplication::applicationFilePath();
+    if (!QFile::exists(agentPath)) {
+        agentPath = QCoreApplication::applicationDirPath() + "/okidia-agent.exe";
+    }
+    if (!QFile::exists(agentPath)) {
+        Logger::warning(QObject::tr("Agent: Input helper için okidia-agent.exe bulunamadı."));
+        return;
+    }
+
+    QStringList args = {QStringLiteral("--input-helper")};
+    if (!m_ipcToken.isEmpty()) {
+        args << QStringLiteral("--ipc-token") << m_ipcToken;
+    }
+
+    void* hProc = nullptr;
+    if (SystemInfo::launchInputHelperInConsoleSession(agentPath, args, &hProc)) {
+        m_hInputHelperProc = hProc;
+        Logger::info(QObject::tr("Agent: UIPI-üstü girdi yardımcısı (okidia-agent --input-helper) konsol oturumunda başlatıldı."));
+    } else {
+        Logger::warning(QObject::tr("Agent: UIPI-üstü girdi yardımcısı başlatılamadı; kullanıcı tray'i üzerinden fallback kullanılacak."));
+    }
+#endif
+}
+
+void AgentApp::stopInputHelper() {
+#if defined(Q_OS_WIN)
+    if (m_ipcServer && m_ipcServer->hasInputHelper()) {
+        okidia::Envelope stopEnv;
+        stopEnv.set_type(okidia::MessageType::REMOTE_CONTROL_STOP);
+        m_ipcServer->sendToInputHelper(stopEnv);
+    }
+
+    if (m_hInputHelperProc) {
+        DWORD waitRes = WaitForSingleObject(reinterpret_cast<HANDLE>(m_hInputHelperProc), 250);
+        if (waitRes == WAIT_TIMEOUT) {
+            TerminateProcess(reinterpret_cast<HANDLE>(m_hInputHelperProc), 0);
+        }
+        CloseHandle(reinterpret_cast<HANDLE>(m_hInputHelperProc));
+        m_hInputHelperProc = nullptr;
+        Logger::info(QObject::tr("Agent: UIPI-üstü girdi yardımcısı sonlandırıldı."));
+    }
+#endif
+}
+
+void AgentApp::flushPendingAudioToActiveTray() {
+    if (m_pendingAudioQueue.isEmpty() || !m_ipcServer || !m_ipcServer->server()) {
+        return;
+    }
+
+    const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
+    for (int i = m_pendingAudioQueue.size() - 1; i >= 0; --i) {
+        if (m_pendingAudioQueue[i].expiresAtMs < nowMs) {
+            m_pendingAudioQueue.removeAt(i);
+        }
+    }
+    if (m_pendingAudioQueue.isEmpty()) {
+        return;
+    }
+
+    LocalConnection* exactActive = m_ipcServer->server()->exactActiveConnection();
+    if (!exactActive || !exactActive->isConnected()) {
+        return;
+    }
+
+    const auto pending = m_pendingAudioQueue;
+    m_pendingAudioQueue.clear();
+    for (const auto& item : pending) {
+        exactActive->sendEnvelope(item.env);
+    }
+    Logger::info(QObject::tr("Agent: Bekleyen %1 adet yerel ses/zil komutu yeni aktif tray'e iletildi → %2")
+                 .arg(pending.size()).arg(m_ipcServer->server()->activeUser()));
+}
+
 void AgentApp::checkSession() {
     const QString newActive  = SystemInfo::activeDisplayUser();
     const bool    onLogin    = SystemInfo::isDmUser(newActive);
 
 #if defined(Q_OS_WIN)
+    const bool workstationLocked = !onLogin && SystemInfo::isWorkstationLocked();
+    const bool useWinlogonTray   = onLogin || workstationLocked;
+    const QString ipcTarget      = useWinlogonTray ? QStringLiteral("winlogon") : newActive;
+
     bool dmTrayRunning = false;
     if (m_hDmTrayProc) {
         DWORD waitRes = WaitForSingleObject(reinterpret_cast<HANDLE>(m_hDmTrayProc), 0);
@@ -1127,10 +1480,10 @@ void AgentApp::checkSession() {
     if (!dmTrayRunning && m_ipcServer->server() && m_ipcServer->server()->hasUserConnection(QStringLiteral("winlogon"))) {
         dmTrayRunning = true;
     }
-    const bool dmTrayMissing = onLogin && !dmTrayRunning;
+    const bool dmTrayMissing = useWinlogonTray && !dmTrayRunning;
 
     bool userTrayMissing = false;
-    if (!onLogin && !newActive.isEmpty() && m_ipcServer->server()) {
+    if (!useWinlogonTray && !newActive.isEmpty() && m_ipcServer->server()) {
         userTrayMissing = !m_ipcServer->server()->hasUserConnection(newActive);
         if (!userTrayMissing) {
             m_userTrayCrashCount = 0;
@@ -1138,6 +1491,9 @@ void AgentApp::checkSession() {
         }
     }
 #else
+    const bool useWinlogonTray = onLogin;
+    const QString ipcTarget    = newActive;
+
     if (onLogin && m_dmTrayProc && m_dmTrayProc->state() != QProcess::Running) {
         Logger::warning(QObject::tr("Agent: DM tray beklenmedik şekilde kapandı, yeniden başlatılıyor..."));
         delete m_dmTrayProc;
@@ -1155,17 +1511,14 @@ void AgentApp::checkSession() {
     }
 #endif
 
-    const bool userChanged = (newActive != m_currentActive);
-    if (!userChanged && !dmTrayMissing && !userTrayMissing) return;
+    const bool userChanged      = (newActive != m_currentActive);
+    const bool ipcTargetChanged = (ipcTarget != m_currentIpcTarget);
+    if (!userChanged && !ipcTargetChanged && !dmTrayMissing && !userTrayMissing) return;
 
     if (userChanged) {
         Logger::info(QObject::tr("Agent: Aktif kullanıcı değişti → '") + newActive + "'");
         const QString prevActive = m_currentActive;
         m_currentActive = newActive;
-
-        if (m_ipcServer->server()) {
-            m_ipcServer->server()->setActiveUser(newActive);
-        }
 
         if (m_tls->isConnected() && !m_tls->isAnonymous()) {
             if (onLogin && !prevActive.isEmpty() && !SystemInfo::isDmUser(prevActive)) {
@@ -1176,8 +1529,28 @@ void AgentApp::checkSession() {
         }
     }
 
-    if (onLogin) {
+    if (ipcTargetChanged || userChanged) {
+        m_currentIpcTarget = ipcTarget;
+        if (m_ipcServer->server()) {
+            m_ipcServer->server()->setActiveUser(ipcTarget);
+            flushPendingAudioToActiveTray();
+
+            // Masaüstü geçişinde (Winlogon ↔ Default) hedef tray zaten bağlıysa aktif durum ve
+            // taze tam kare (keyframe) anında yeniden gönderilir.
+            if (ipcTargetChanged) {
+                if (LocalConnection* exact = m_ipcServer->server()->exactActiveConnection()) {
+                    m_ipcServer->replayActiveStateToTray(exact);
+                    okidia::Envelope refreshEnv;
+                    refreshEnv.set_type(okidia::MessageType::REFRESH_REQUEST);
+                    exact->sendEnvelope(refreshEnv);
+                }
+            }
+        }
+    }
+
+    if (useWinlogonTray) {
 #if defined(Q_OS_WIN)
+        stopInputHelper();
         if (!dmTrayRunning) {
             QProcess killProc;
             killProc.start("taskkill.exe", {"/F", "/FI", "USERNAME eq SYSTEM", "/IM", "okidia-tray.exe"});
@@ -1207,31 +1580,210 @@ void AgentApp::checkSession() {
         }
 #else
         if (!m_dmTrayProc) {
-            const QString xauth = SystemInfo::dmXauthority();
-            if (xauth.isEmpty()) {
-                Logger::info(QObject::tr("Agent: Login ekranı var, XAUTHORITY bekleniyor..."));
-                return;
+            const QString dmUser = newActive.isEmpty() ? QStringLiteral("lightdm") : newActive;
+
+            // Wayland Greeter kontrolü (Ubuntu 24.04/26.04 GDM3, gdm-greeter DynamicUser veya SDDM Wayland)
+            QString dmUidStr;
+            {
+                // 1. Önce loginctl üzerinden aktif greeter oturumunun sayısal User (UID) değerini sorgula
+                // (Ubuntu 26.04 gdm-greeter gibi systemd DynamicUser hesaplarında en güvenilir yöntemdir)
+                QProcess pList;
+                pList.start(QStringLiteral("loginctl"), {QStringLiteral("list-sessions"), QStringLiteral("--no-legend")});
+                if (pList.waitForFinished(500) && pList.exitCode() == 0) {
+                    const QStringList lines = QString::fromLatin1(pList.readAllStandardOutput()).split('\n', Qt::SkipEmptyParts);
+                    for (const QString& line : lines) {
+                        const QStringList parts = line.split(QRegularExpression(QStringLiteral("\\s+")), Qt::SkipEmptyParts);
+                        if (parts.size() >= 3) {
+                            const QString sUid = parts[1];
+                            const QString sUser = parts[2];
+                            if (sUser == dmUser || SystemInfo::isDmUser(sUser)) {
+                                dmUidStr = sUid;
+                                break;
+                            }
+                        }
+                    }
+                }
+                if (dmUidStr.isEmpty()) {
+                    QProcess pId;
+                    pId.start(QStringLiteral("id"), {QStringLiteral("-u"), dmUser});
+                    if (pId.waitForFinished(500) && pId.exitCode() == 0) {
+                        dmUidStr = QString::fromLatin1(pId.readAllStandardOutput()).trimmed();
+                    }
+                }
             }
 
-            Logger::info(QObject::tr("Agent: DM tray başlatılıyor → XAUTH:") + xauth);
-            m_dmTrayProc = new QProcess();
-
-            QProcessEnvironment penv = QProcessEnvironment::systemEnvironment();
-            penv.insert("DISPLAY", ":0");
-            penv.insert("XAUTHORITY", xauth);
-            penv.remove("XDG_RUNTIME_DIR");
-            penv.remove("DBUS_SESSION_BUS_ADDRESS");
-            m_dmTrayProc->setProcessEnvironment(penv);
-
-            QStringList args = {"--username", "lightdm"};
-            if (!m_ipcToken.isEmpty()) {
-                args << "--ipc-token" << m_ipcToken;
+            QString dmWaylandSocket;
+            QString dmRuntimeDir = dmUidStr.isEmpty() ? QString() : (QStringLiteral("/run/user/") + dmUidStr);
+            if (!dmRuntimeDir.isEmpty() && QDir(dmRuntimeDir).exists()) {
+                QDir rtDir(dmRuntimeDir);
+                const QStringList wlSocks = rtDir.entryList(QStringList() << QStringLiteral("wayland-*"), QDir::System | QDir::Files);
+                for (const QString& s : wlSocks) {
+                    if (!s.endsWith(QStringLiteral(".lock"))) {
+                        dmWaylandSocket = s;
+                        break;
+                    }
+                }
             }
-            m_dmTrayProc->start("/usr/bin/okidia-tray", args);
+
+            // Fallback: /run/user/* altında aktif wayland-* soketi olan herhangi bir DM dizinini bul
+            if (dmWaylandSocket.isEmpty()) {
+                QDir runUser(QStringLiteral("/run/user"));
+                for (const QString& sub : runUser.entryList(QDir::Dirs | QDir::NoDotAndDotDot)) {
+                    const QString candDir = runUser.absoluteFilePath(sub);
+                    QDir rtDir(candDir);
+                    const QStringList wlSocks = rtDir.entryList(QStringList() << QStringLiteral("wayland-*"), QDir::System | QDir::Files);
+                    for (const QString& s : wlSocks) {
+                        if (!s.endsWith(QStringLiteral(".lock"))) {
+                            dmRuntimeDir = candDir;
+                            dmUidStr = sub;
+                            dmWaylandSocket = s;
+                            break;
+                        }
+                    }
+                    if (!dmWaylandSocket.isEmpty()) break;
+                }
+            }
+
+            if (!dmWaylandSocket.isEmpty() && !dmRuntimeDir.isEmpty()) {
+                // GDM / Wayland Greeter: Dosya sisteminden gerçek UID ve GID değerlerini al
+                const QFileInfo rtInfo(dmRuntimeDir);
+                const uint targetUid = rtInfo.ownerId();
+                const uint targetGid = rtInfo.groupId();
+
+                if (targetUid > 0) {
+                    QProcess::execute(QStringLiteral("pkill"), {QStringLiteral("-U"), QString::number(targetUid), QStringLiteral("-x"), QStringLiteral("okidia-tray")});
+                }
+
+                // GDM dconf profilini ve okidia-kiosk etkinleştirmesini doğrula (Ubuntu 26.04 gdm-greeter DynamicUser uyumu)
+                // Kaldırma (uninstall) sırasında geri yüklenebilmesi için mevcut /etc/dconf/profile/gdm yedeğini koru
+                if (QFile::exists(QStringLiteral("/usr/share/gnome-shell/extensions/okidia-kiosk@okidia.net/extension.js"))) {
+                    QFile::remove(QStringLiteral("/etc/dconf/db/local.d/locks/okidia-kiosk"));
+                    QFile::remove(QStringLiteral("/etc/dconf/db/gdm.d/locks/okidia-kiosk"));
+                    if (!QFile::exists(QStringLiteral("/etc/dconf/profile/gdm")) ||
+                        !QFile::exists(QStringLiteral("/etc/dconf/db/gdm.d/00-okidia-kiosk"))) {
+                        QProcess::execute(QStringLiteral("/bin/sh"), {
+                            QStringLiteral("-c"),
+                            QStringLiteral(
+                                "mkdir -p /etc/dconf/profile /etc/dconf/db/gdm.d; "
+                                "if [ -f /etc/dconf/profile/gdm ] && [ ! -f /etc/dconf/profile/gdm.okidia-bak ] && [ ! -f /etc/dconf/profile/.okidia-created-gdm ]; then "
+                                "  cp -a /etc/dconf/profile/gdm /etc/dconf/profile/gdm.okidia-bak; "
+                                "elif [ ! -f /etc/dconf/profile/gdm ] && [ ! -f /etc/dconf/profile/gdm.okidia-bak ]; then "
+                                "  touch /etc/dconf/profile/.okidia-created-gdm; "
+                                "fi; "
+                                "FDB=''; "
+                                "[ -f /usr/share/dconf/profile/gdm ] && FDB=$(grep '^file-db:' /usr/share/dconf/profile/gdm 2>/dev/null | head -1); "
+                                "[ -z \"$FDB\" ] && [ -f /var/lib/gdm3/greeter-dconf-defaults ] && FDB='file-db:/var/lib/gdm3/greeter-dconf-defaults'; "
+                                "[ -z \"$FDB\" ] && [ -f /usr/share/gdm/greeter-dconf-defaults ] && FDB='file-db:/usr/share/gdm/greeter-dconf-defaults'; "
+                                "{ echo 'user-db:user'; echo 'system-db:gdm'; echo 'system-db:local'; [ -n \"$FDB\" ] && echo \"$FDB\"; } > /etc/dconf/profile/gdm; "
+                                "dconf update >/dev/null 2>&1 || true"
+                            )
+                        });
+                    }
+                }
+
+                const QString xauth = SystemInfo::dmXauthority();
+                const QString disp = SystemInfo::activeDmDisplay();
+                const QString dbusAddr = QStringLiteral("unix:path=") + dmRuntimeDir + QStringLiteral("/bus");
+
+                // DynamicUser (gdm-greeter) /var/lib/gdm3 dizinine yazamayacağı için HOME olarak
+                // kendisine ait olan /run/user/<uid> dizinini kullan
+                const QString dmHome = dmRuntimeDir;
+
+                Logger::info(QObject::tr("Agent: Wayland DM tray başlatılıyor (%1, UID:%2, Wayland:%3)...")
+                             .arg(dmUser).arg(targetUid).arg(dmWaylandSocket));
+                m_dmTrayProc = new QProcess();
+
+                QString tokenArg;
+                if (!m_ipcToken.isEmpty()) {
+                    tokenArg = QStringLiteral(" --ipc-token '") + m_ipcToken + QStringLiteral("'");
+                }
+                QString xauthExport;
+                if (!xauth.isEmpty() && QFile::exists(xauth)) {
+                    xauthExport = QStringLiteral("DISPLAY='%1' XAUTHORITY='%2' ").arg(disp, xauth);
+                } else {
+                    xauthExport = QStringLiteral("unset DISPLAY XAUTHORITY; ");
+                }
+
+                const QString cmd = QStringLiteral(
+                    "%1export HOME='%2' USER='%6' LOGNAME='%6' QT_QPA_PLATFORM='wayland;xcb' WAYLAND_DISPLAY='%3' "
+                    "XDG_SESSION_TYPE='wayland' XDG_CURRENT_DESKTOP='GNOME' "
+                    "XDG_RUNTIME_DIR='%4' PULSE_RUNTIME_PATH='%4/pulse' DBUS_SESSION_BUS_ADDRESS='%5'; "
+                    "gsettings set org.gnome.shell disable-user-extensions false >/dev/null 2>&1 || true; "
+                    "gsettings set org.gnome.shell disable-extension-version-validation true >/dev/null 2>&1 || true; "
+                    "gsettings set org.gnome.shell enabled-extensions \"['okidia-kiosk@okidia.net']\" >/dev/null 2>&1 || true; "
+                    "gnome-extensions enable okidia-kiosk@okidia.net >/dev/null 2>&1 || true; "
+                    "gdbus call --session --dest org.gnome.Shell.Extensions --object-path /org/gnome/Shell/Extensions "
+                    "--method org.gnome.Shell.Extensions.EnableExtension 'okidia-kiosk@okidia.net' >/dev/null 2>&1 || true; "
+                    "if command -v pipewire >/dev/null 2>&1 && ! pgrep -U %8 -x pipewire >/dev/null 2>&1; then "
+                    "  pipewire >/dev/null 2>&1 & "
+                    "  sleep 0.2; "
+                    "  command -v wireplumber >/dev/null 2>&1 && ! pgrep -U %8 -x wireplumber >/dev/null 2>&1 && (wireplumber >/dev/null 2>&1 &); "
+                    "  command -v pipewire-pulse >/dev/null 2>&1 && ! pgrep -U %8 -x pipewire-pulse >/dev/null 2>&1 && (pipewire-pulse >/dev/null 2>&1 &); "
+                    "elif command -v pipewire-pulse >/dev/null 2>&1 && ! pgrep -U %8 -x pipewire-pulse >/dev/null 2>&1; then "
+                    "  pipewire-pulse >/dev/null 2>&1 & "
+                    "fi; "
+                    "exec /usr/bin/okidia-tray --username '%6'%7"
+                ).arg(xauthExport, dmHome, dmWaylandSocket, dmRuntimeDir, dbusAddr, dmUser, tokenArg, QString::number(targetUid));
+
+                // setpriv: PAM ve /etc/shadow kontrolüne takılmadan doğrudan çekirdek seviyesinde UID/GID düşürür
+                // (Ubuntu 26.04 gdm-greeter DynamicUser hesaplarında su komutu PAM tarafından reddedildiği için şarttır)
+                if (QFile::exists(QStringLiteral("/usr/bin/setpriv")) && targetUid > 0) {
+                    const QString grpFlag = (::getpwuid(static_cast<uid_t>(targetUid)) != nullptr)
+                                                ? QStringLiteral("--init-groups")
+                                                : QStringLiteral("--clear-groups");
+                    m_dmTrayProc->start(QStringLiteral("/usr/bin/setpriv"), {
+                        QStringLiteral("--reuid=") + QString::number(targetUid),
+                        QStringLiteral("--regid=") + QString::number(targetGid),
+                        grpFlag,
+                        QStringLiteral("/bin/sh"),
+                        QStringLiteral("-c"),
+                        cmd
+                    });
+                } else {
+                    m_dmTrayProc->start(QStringLiteral("su"), {QStringLiteral("-s"), QStringLiteral("/bin/sh"), dmUser, QStringLiteral("-c"), cmd});
+                }
+            } else {
+                // X11 Greeter (LightDM, SDDM X11, GDM Xorg)
+                const QString xauth = SystemInfo::dmXauthority();
+                if (xauth.isEmpty()) {
+                    Logger::info(QObject::tr("Agent: Login ekranı (%1) var, XAUTHORITY veya Wayland soketi bekleniyor...").arg(dmUser));
+                    return;
+                }
+
+                const QString disp = SystemInfo::activeDmDisplay();
+                Logger::info(QObject::tr("Agent: X11 DM tray başlatılıyor (%1) → DISPLAY:%2 XAUTH:%3").arg(dmUser, disp, xauth));
+                m_dmTrayProc = new QProcess();
+
+                QProcessEnvironment penv = QProcessEnvironment::systemEnvironment();
+                penv.insert(QStringLiteral("DISPLAY"), disp);
+                penv.insert(QStringLiteral("XAUTHORITY"), xauth);
+                penv.remove(QStringLiteral("XDG_RUNTIME_DIR"));
+                penv.remove(QStringLiteral("PULSE_RUNTIME_PATH"));
+                penv.remove(QStringLiteral("DBUS_SESSION_BUS_ADDRESS"));
+                if (!dmRuntimeDir.isEmpty() &&
+                    (QFile::exists(dmRuntimeDir + QStringLiteral("/pulse/native")) ||
+                     QFile::exists(dmRuntimeDir + QStringLiteral("/pipewire-0")))) {
+                    penv.insert(QStringLiteral("XDG_RUNTIME_DIR"), dmRuntimeDir);
+                    penv.insert(QStringLiteral("PULSE_RUNTIME_PATH"), dmRuntimeDir + QStringLiteral("/pulse"));
+                    if (QFile::exists(dmRuntimeDir + QStringLiteral("/bus"))) {
+                        penv.insert(QStringLiteral("DBUS_SESSION_BUS_ADDRESS"), QStringLiteral("unix:path=") + dmRuntimeDir + QStringLiteral("/bus"));
+                    }
+                }
+                m_dmTrayProc->setProcessEnvironment(penv);
+
+                QStringList args = {QStringLiteral("--username"), dmUser};
+                if (!m_ipcToken.isEmpty()) {
+                    args << QStringLiteral("--ipc-token") << m_ipcToken;
+                }
+                m_dmTrayProc->start(QStringLiteral("/usr/bin/okidia-tray"), args);
+            }
         }
 #endif
     } else {
 #if defined(Q_OS_WIN)
+        if (m_ipcServer && m_ipcServer->isRemoteControlActive()) {
+            startInputHelper();
+        }
         if (m_hDmTrayProc) {
             Logger::info(QObject::tr("Agent: Kullanıcı girdi, winlogon DM tray kapatılıyor..."));
             TerminateProcess(reinterpret_cast<HANDLE>(m_hDmTrayProc), 0);
@@ -1282,7 +1834,7 @@ void AgentApp::checkSession() {
         }
 
         if (userTrayMissing && !m_hUserTrayProc) {
-            if (now < m_userTrayBackoffUntil) {
+            if (now < m_userTrayBackoffUntil || now < m_logoutInProgressUntil) {
                 return;
             }
             if (now - m_lastUserTrayLaunch >= 10) {
@@ -1341,9 +1893,21 @@ void AgentApp::checkSession() {
             m_dmTrayProc->waitForFinished(3000);
             delete m_dmTrayProc;
             m_dmTrayProc = nullptr;
+            QProcess::execute(QStringLiteral("pkill"), {QStringLiteral("-f"), QStringLiteral("okidia-tray --username gdm")});
+            QProcess::execute(QStringLiteral("pkill"), {QStringLiteral("-f"), QStringLiteral("okidia-tray --username sddm")});
+            QProcess::execute(QStringLiteral("pkill"), {QStringLiteral("-f"), QStringLiteral("okidia-tray --username lightdm")});
+            for (const QString& dmU : {QStringLiteral("gdm"), QStringLiteral("Debian-gdm"), QStringLiteral("gdm3"), QStringLiteral("gdm-greeter"), QStringLiteral("gdm-greeter-1"), QStringLiteral("gdm-greeter-2"), QStringLiteral("sddm"), QStringLiteral("lightdm")}) {
+                QProcess::execute(QStringLiteral("pkill"), {QStringLiteral("-u"), dmU, QStringLiteral("-x"), QStringLiteral("okidia-tray")});
+                QProcess::execute(QStringLiteral("pkill"), {QStringLiteral("-u"), dmU, QStringLiteral("-x"), QStringLiteral("pipewire-pulse")});
+                QProcess::execute(QStringLiteral("pkill"), {QStringLiteral("-u"), dmU, QStringLiteral("-x"), QStringLiteral("pipewire")});
+                QProcess::execute(QStringLiteral("pkill"), {QStringLiteral("-u"), dmU, QStringLiteral("-x"), QStringLiteral("wireplumber")});
+            }
         }
 
         qint64 now = QDateTime::currentSecsSinceEpoch();
+        if (now < m_logoutInProgressUntil) {
+            return;
+        }
         if (userTrayMissing && (now - m_lastUserTrayLaunch >= 10)) {
             m_lastUserTrayLaunch = now;
 

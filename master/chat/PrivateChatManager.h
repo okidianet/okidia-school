@@ -13,6 +13,7 @@
 
 #include <QObject>
 #include <QMap>
+#include <QSet>
 #include <QList>
 #include <QDateTime>
 
@@ -42,6 +43,7 @@ struct PendingRequest {
     QString fromId;
     QString fromDisplay;
     QString fromHost;
+    QString fromUser;
     qint64  sentAt = 0;
 };
 
@@ -76,6 +78,13 @@ public:
     // ── İstek yanıtı ─────────────────────────────────────────────────────────
     void acceptRequest(const QString& requestId);
     void rejectRequest(const QString& requestId);
+    void ignoreRequest(const QString& requestId);
+
+    // ── Kullanıcı Bazlı İstek Yoksayma (<clientId>:<username>) ───────────────
+    static QString makeUserKey(const QString& clientId, const QString& username);
+    void ignoreUser(const QString& clientId, const QString& username);
+    void unignoreUser(const QString& clientId, const QString& username);
+    bool isUserIgnored(const QString& clientId, const QString& username) const;
 
     // ── Mesaj gönder ──────────────────────────────────────────────────────────
     void sendMessage(const QString& sessionId, const QString& content);
@@ -107,12 +116,14 @@ signals:
     void sessionClosed   (const QString& sessionId);
     void messageReceived (const QString& sessionId, const PrivateMessage& msg);
     void cooldownChanged (const QString& peerId, qint64 endsAt);
+    void ignoredUsersChanged();
 
 private:
     SessionManager* m_session;
 
     QMap<QString, PrivateSession*> m_sessions;   // sessionId → session
     QList<PendingRequest>          m_pending;
+    QSet<QString>                  m_ignoredUsers; // "<clientId>:<username>"
 
     // Ret geçmişi: peerId → {retAt, retCount}
     struct RejectRecord { qint64 lastAt; int count; };

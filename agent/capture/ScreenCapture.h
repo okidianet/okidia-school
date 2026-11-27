@@ -51,6 +51,7 @@ public:
     QByteArray captureFullFrame();          // Thumbnail kalitesi (%25 scale)
     QByteArray captureFullFrameHQ();        // Yüksek kalite (%100 scale, %90 JPEG)
     std::vector<TileUpdate> captureDirtyTiles();
+    QImage     captureScreen();
 
     int screenWidth() const;
     int screenHeight() const;
@@ -81,7 +82,6 @@ private:
     void   releaseGdi();
 #endif
 
-    QImage     captureScreen();
     void       drawCursor(QImage& img);
     QImage     captureMonitor(int idx);
     QImage     captureWindow(quint64 wid);

@@ -60,6 +60,16 @@ SessionManager::SessionManager(QObject* parent)
             m_remoteProbeTimer->start(2500);
         }
     });
+
+    m_blankThumbWatchdog = new QTimer(this);
+    m_blankThumbWatchdog->setInterval(3000);
+    connect(m_blankThumbWatchdog, &QTimer::timeout,
+            this, &SessionManager::onBlankThumbnailWatchdog);
+
+    m_staggerRefreshTimer = new QTimer(this);
+    m_staggerRefreshTimer->setInterval(120);
+    connect(m_staggerRefreshTimer, &QTimer::timeout,
+            this, &SessionManager::onStaggerRefreshTick);
 }
 
 SessionManager::~SessionManager() {
@@ -89,6 +99,9 @@ void SessionManager::loadFromDatabase() {
         m_clientGroups[rec.machineId] = rec.classId;
 
         if (m_clientStates.contains(rec.machineId) && m_clientStates[rec.machineId].connected) {
+            if (m_clientStates[rec.machineId].alias.isEmpty() && !rec.alias.isEmpty()) {
+                m_clientStates[rec.machineId].alias = rec.alias;
+            }
             // Agent zaten bağlı (ClientInfo MainWindow oluşturulmadan önce gelmiş olabilir)
             // MainWindow'a mevcut 'online' durumunu bildir ki UI'da çevrimiçi görünsün
             emit clientConnected(rec.machineId, m_clientStates[rec.machineId]);
@@ -115,6 +128,7 @@ void SessionManager::loadFromDatabase() {
         state.clientId  = rec.machineId;
         state.hostname  = rec.hostname;
         state.machineId = rec.machineId;
+        state.alias     = rec.alias;
         state.ip        = rec.ip;
         state.agentType = rec.agentType;
         state.agentVersion = rec.agentVer;
@@ -152,6 +166,11 @@ void SessionManager::loadFromDatabase() {
 void SessionManager::clearCredentials() {
     m_username.clear();
     m_passwordHash.clear();
+    m_isAuthenticated = false;
+    m_reauthRetryAttempted = false;
+    if (m_reauthWatchdogTimer && m_reauthWatchdogTimer->isActive()) {
+        m_reauthWatchdogTimer->stop();
+    }
     m_activeUser = {};
     m_isKickedToOffline = false;
     m_isOfflineMode = false;
@@ -635,7 +654,7 @@ void SessionManager::clearThumbnails() {
 
 bool SessionManager::sendCommand(const QString& clientId,
                                   const okidia::Envelope& envelope) {
-    if (!m_conn || !m_conn->isConnected()) return false;
+    if (!m_conn || !m_conn->isConnected() || !m_isAuthenticated) return false;
 
     // OM yetki kontrolü
     if (!canManageClient(clientId)) {
@@ -807,7 +826,7 @@ void SessionManager::setVisibleClients(const QSet<QString>& visibleClients) {
 }
 
 void SessionManager::onVisibleDebounceTimeout() {
-    if (!m_conn || !m_conn->isConnected()) {
+    if (!m_conn || !m_conn->isConnected() || !m_isAuthenticated || m_isOfflineMode) {
         m_visibleClients = m_pendingVisibleClients;
         return;
     }
@@ -873,6 +892,8 @@ void SessionManager::onVisibleDebounceTimeout() {
 
         okidia::ScreenConfig cfg;
         cfg.set_interval_ms(static_cast<uint32_t>(intervalMs));
+        cfg.set_jpeg_quality(60);
+        cfg.set_max_width(360);
         okidia::Envelope fpsEnv;
         fpsEnv.set_type(okidia::MessageType::SCREEN_FPS_SET);
         fpsEnv.set_payload(cfg.SerializeAsString());
@@ -1124,6 +1145,14 @@ void SessionManager::onBrokerConnected(Connection* conn) {
 
     m_connecting = false;
     m_isProbingRemote = false;
+    m_isAuthenticated = false;
+    m_reauthRetryAttempted = false;
+    if (m_reauthWatchdogTimer && m_reauthWatchdogTimer->isActive()) {
+        m_reauthWatchdogTimer->stop();
+    }
+    if (m_blankThumbWatchdog && m_blankThumbWatchdog->isActive()) {
+        m_blankThumbWatchdog->stop();
+    }
     m_conn = conn;
     if (!m_isRemoteConnection) {
         m_localBrokerHost = m_tls->host();
@@ -1154,6 +1183,24 @@ void SessionManager::onBrokerConnected(Connection* conn) {
     // Yeniden bağlantıda otomatik olarak giriş yap
     QString loginUser = !m_username.isEmpty() ? m_username : m_activeUser.username;
     QString loginPass = !m_passwordHash.isEmpty() ? m_passwordHash : m_activeUser.passwordHash;
+
+    // Bellekteki parola hash'i boş kaldıysa yerel SQLite DB'den aktif kullanıcı hash'ini kurtar
+    if (loginPass.isEmpty() && OkidiaDatabase::instance().isOpen() &&
+        !m_activeUser.id.isEmpty() && m_activeUser.id != "offline_admin") {
+        UserRecord dbUser = OkidiaDatabase::instance().userById(m_activeUser.id);
+        if (dbUser.id.isEmpty() && !loginUser.isEmpty()) {
+            dbUser = OkidiaDatabase::instance().userByUsername(loginUser);
+        }
+        if (!dbUser.id.isEmpty() && !dbUser.passwordHash.isEmpty()) {
+            if (loginUser.isEmpty()) loginUser = dbUser.username;
+            loginPass = dbUser.passwordHash;
+            m_username = loginUser;
+            m_passwordHash = loginPass;
+            m_activeUser.passwordHash = loginPass;
+            Logger::info(QObject::tr("SessionManager: Otomatik yeniden giriş için kimlik bilgisi yerel DB'den kurtarıldı → ") + loginUser);
+        }
+    }
+
     bool hasCredentials = !loginUser.isEmpty() && !loginPass.isEmpty();
 
     if (m_isKickedToOffline) {
@@ -1161,22 +1208,186 @@ void SessionManager::onBrokerConnected(Connection* conn) {
     } else if (hasCredentials) {
         Logger::info(QObject::tr("SessionManager: Bağlantı yeniden kuruldu, otomatik olarak tekrar giriş yapılıyor..."));
         requestLogin(loginUser, loginPass);
+
+        // Broker yeniden başlatma / IP değişimi yarışında LOGIN_RESPONSE düşerse
+        // 5 saniye sonra tek seferlik otomatik tekrar deneme yapan watchdog
+        if (!m_reauthWatchdogTimer) {
+            m_reauthWatchdogTimer = new QTimer(this);
+            m_reauthWatchdogTimer->setSingleShot(true);
+            connect(m_reauthWatchdogTimer, &QTimer::timeout, this, [this]() {
+                if (!m_conn || !m_conn->isConnected() || m_isAuthenticated || m_isKickedToOffline) {
+                    return;
+                }
+                const QString u = !m_username.isEmpty() ? m_username : m_activeUser.username;
+                const QString p = !m_passwordHash.isEmpty() ? m_passwordHash : m_activeUser.passwordHash;
+                if (!m_reauthRetryAttempted && !u.isEmpty() && !p.isEmpty()) {
+                    m_reauthRetryAttempted = true;
+                    Logger::warning(QObject::tr("SessionManager: Otomatik yeniden giriş yanıtı 5 sn içinde alınamadı, tekrar deneniyor..."));
+                    requestLogin(u, p);
+                    m_reauthWatchdogTimer->start(5000);
+                } else if (m_isOfflineMode) {
+                    Logger::error(QObject::tr("SessionManager: Otomatik yeniden giriş zaman aşımına uğradı, kullanıcıya bildirim gönderiliyor."));
+                    emit offlineLoginFailed(tr("Sunucu kimlik doğrulama yanıtı zaman aşımına uğradı."));
+                }
+            });
+        }
+        m_reauthWatchdogTimer->start(5000);
+    } else if (!m_activeUser.id.isEmpty() && m_activeUser.id != "offline_admin") {
+        Logger::warning(QObject::tr("SessionManager: Aktif oturum (%1) için önbellekte parola hash'i bulunamadı, otomatik yeniden giriş yapılamıyor!")
+                        .arg(loginUser.isEmpty() ? m_activeUser.id : loginUser));
+        if (m_isOfflineMode) {
+            emit offlineLoginFailed(tr("Oturum kimlik bilgileri bellekte bulunamadı."));
+        }
     }
 
     emit brokerConnected();
     emit connectionModeChanged(connectionMode());
 
     // Yeniden bağlantıda veya ilk bağlantıda:
-    // Eğer kimlik bilgisi yoksa (ilk anonim bağlantı vb.) görünür istemcileri ilet.
-    // Kimlik bilgisi varsa, görünür istemci abonelikleri LOGIN_RESPONSE başarılı döndükten sonra güvenle iletilir.
-    if (!hasCredentials && !m_visibleClients.isEmpty()) {
-        setVisibleClients(m_visibleClients);
+    // Görünür istemci abonelikleri ve boş-kare watchdog'u YALNIZCA LOGIN_RESPONSE
+    // başarılı döndükten sonra başlatılır; böylece oturum açılmadan Broker'a yetkisiz
+    // SCREEN_FPS_SET / REFRESH_REQUEST paketleri gönderilmez.
+}
+
+void SessionManager::onBlankThumbnailWatchdog() {
+    if (!m_conn || !m_conn->isConnected() || !m_isAuthenticated || m_isOfflineMode || m_isStreamPaused || m_visibleClients.isEmpty()) {
+        return;
+    }
+
+    const int intervalMs = calculateAdaptiveFps(m_visibleClients.size());
+    if (intervalMs <= 0) return;
+
+    QStringList blankClients;
+    for (const QString& cid : m_visibleClients) {
+        if (m_streamingClients.contains(cid)) continue;
+        const auto stIt = m_clientStates.constFind(cid);
+        if (stIt == m_clientStates.constEnd() || !stIt->connected || stIt->agentType == 2) {
+            continue;
+        }
+        if (stIt->lockType == "RemoteControl" || stIt->lockType == "ScreenView" || stIt->lockType == "Broadcast") {
+            continue;
+        }
+        ClientThumbnail* thumb = m_thumbnails.value(cid, nullptr);
+        if (!thumb || thumb->hasValidFrame()) {
+            continue;
+        }
+        blankClients << cid;
+    }
+
+    if (blankClients.isEmpty()) {
+        m_blankWatchdogCursor = 0;
+        return;
+    }
+
+    // Senkron ağ patlamasını (thundering herd) önlemek için her döngüde en fazla 3 boş istemciye
+    // round-robin sırayla kompakt thumbnail konfigürasyonu (max_width=360) + tam kare (REFRESH_REQUEST) iste.
+    const int batchCount = qMin(3, blankClients.size());
+    if (m_blankWatchdogCursor >= blankClients.size()) {
+        m_blankWatchdogCursor = 0;
+    }
+    for (int i = 0; i < batchCount; ++i) {
+        const QString& cid = blankClients[(m_blankWatchdogCursor + i) % blankClients.size()];
+
+        okidia::ScreenConfig cfg;
+        cfg.set_interval_ms(static_cast<uint32_t>(intervalMs));
+        cfg.set_jpeg_quality(60);
+        cfg.set_max_width(360);
+        okidia::Envelope fpsEnv;
+        fpsEnv.set_type(okidia::MessageType::SCREEN_FPS_SET);
+        fpsEnv.set_payload(cfg.SerializeAsString());
+        fpsEnv.set_target_id(cid.toStdString());
+        m_conn->sendEnvelope(fpsEnv);
+
+        okidia::Envelope refEnv;
+        refEnv.set_type(okidia::MessageType::REFRESH_REQUEST);
+        refEnv.set_target_id(cid.toStdString());
+        m_conn->sendEnvelope(refEnv);
+    }
+    m_blankWatchdogCursor = (m_blankWatchdogCursor + batchCount) % blankClients.size();
+}
+
+int SessionManager::refreshVisibleThumbnails() {
+    if (!m_conn || !m_conn->isConnected() || !m_isAuthenticated || m_isOfflineMode || m_visibleClients.isEmpty()) {
+        return 0;
+    }
+    if (m_isStreamPaused) {
+        setStreamPaused(false);
+    }
+
+    m_staggerRefreshQueue.clear();
+    for (const QString& cid : m_visibleClients) {
+        if (m_streamingClients.contains(cid)) continue;
+        const auto stIt = m_clientStates.constFind(cid);
+        if (stIt == m_clientStates.constEnd() || !stIt->connected || stIt->agentType == 2) {
+            continue;
+        }
+        if (stIt->lockType == "RemoteControl" || stIt->lockType == "ScreenView" || stIt->lockType == "Broadcast") {
+            continue;
+        }
+        m_staggerRefreshQueue << cid;
+    }
+
+    const int count = m_staggerRefreshQueue.size();
+    if (count > 0 && m_staggerRefreshTimer) {
+        onStaggerRefreshTick(); // İlk 3 istemciyi anında gönder
+        if (!m_staggerRefreshQueue.isEmpty() && !m_staggerRefreshTimer->isActive()) {
+            m_staggerRefreshTimer->start();
+        }
+    }
+    return count;
+}
+
+void SessionManager::onStaggerRefreshTick() {
+    if (!m_conn || !m_conn->isConnected() || !m_isAuthenticated || m_isOfflineMode || m_staggerRefreshQueue.isEmpty()) {
+        m_staggerRefreshQueue.clear();
+        if (m_staggerRefreshTimer) m_staggerRefreshTimer->stop();
+        return;
+    }
+
+    const int intervalMs = qMax(200, calculateAdaptiveFps(m_visibleClients.size()));
+    const int batch = qMin(3, m_staggerRefreshQueue.size());
+    for (int i = 0; i < batch; ++i) {
+        const QString cid = m_staggerRefreshQueue.takeFirst();
+        if (m_streamingClients.contains(cid)) continue;
+
+        okidia::ScreenConfig cfg;
+        cfg.set_interval_ms(static_cast<uint32_t>(intervalMs));
+        cfg.set_jpeg_quality(60);
+        cfg.set_max_width(360);
+        okidia::Envelope fpsEnv;
+        fpsEnv.set_type(okidia::MessageType::SCREEN_FPS_SET);
+        fpsEnv.set_payload(cfg.SerializeAsString());
+        fpsEnv.set_target_id(cid.toStdString());
+        m_conn->sendEnvelope(fpsEnv);
+
+        okidia::Envelope refEnv;
+        refEnv.set_type(okidia::MessageType::REFRESH_REQUEST);
+        refEnv.set_target_id(cid.toStdString());
+        m_conn->sendEnvelope(refEnv);
+    }
+
+    if (m_staggerRefreshQueue.isEmpty() && m_staggerRefreshTimer) {
+        m_staggerRefreshTimer->stop();
     }
 }
 
 void SessionManager::onBrokerDisconnected() {
+    if (m_reauthWatchdogTimer && m_reauthWatchdogTimer->isActive()) {
+        m_reauthWatchdogTimer->stop();
+    }
+    m_reauthRetryAttempted = false;
+    if (m_blankThumbWatchdog) {
+        m_blankThumbWatchdog->stop();
+    }
+    if (m_staggerRefreshTimer) {
+        m_staggerRefreshTimer->stop();
+    }
+    m_staggerRefreshQueue.clear();
+    m_blankWatchdogCursor = 0;
     m_connecting = false;
+    m_isAuthenticated = false;
     m_conn = nullptr;
+    m_lastSentIntervalMs = -1; // Yeniden bağlantıda SCREEN_FPS_SET aboneliğinin zorla yenilenmesini garanti et
     Logger::warning(QObject::tr("SessionManager: Broker bağlantısı kesildi"));
 
     // Eğer uzak host probu denenirken bağlantı koptuysa veya zaman aşımına uğradıysa,

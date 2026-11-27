@@ -9,15 +9,6 @@
 #include <QCryptographicHash>
 #include <QtEndian>
 
-#if defined(Q_OS_WIN)
-#  ifndef WIN32_LEAN_AND_MEAN
-#    define WIN32_LEAN_AND_MEAN
-#  endif
-#  include <windows.h>
-#  include <wincrypt.h>
-#  include <dpapi.h>
-#endif
-
 #include <openssl/pem.h>
 #include <openssl/err.h>
 #include <openssl/rand.h>
@@ -25,6 +16,18 @@
 #include <openssl/x509_vfy.h>
 #include <openssl/x509v3.h>
 #include <openssl/hmac.h>
+
+#if defined(Q_OS_WIN)
+#  ifndef WIN32_LEAN_AND_MEAN
+#    define WIN32_LEAN_AND_MEAN
+#  endif
+#  include <windows.h>
+#  include <wincrypt.h>
+#  include <dpapi.h>
+#  ifdef X509_NAME
+#    undef X509_NAME
+#  endif
+#endif
 
 // OpenSSL hata mesajını QString'e çevir
 static QString opensslError() {

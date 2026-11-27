@@ -170,6 +170,22 @@ void FileReceiver::handleEnd(uint64_t seqId) {
 
     qint64 size  = static_cast<qint64>(t->receivedSize);
 
+    if (t->destIsAsset) {
+        // Sistem varlık dizini (/var/lib/okidia/assets) ve dosyaları tüm kullanıcılar + DM oturumları
+        // tarafından okunabilir kalmalıdır; oturum kullanıcısına chown edilmez.
+        const QString assetDir = QFileInfo(path).absolutePath();
+        QFile::setPermissions(assetDir,
+            QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner |
+            QFile::ReadGroup | QFile::ExeGroup |
+            QFile::ReadOther | QFile::ExeOther);
+        QFile::setPermissions(path,
+            QFile::ReadOwner | QFile::WriteOwner |
+            QFile::ReadGroup | QFile::ReadOther);
+        Logger::info(QObject::tr("FileReceiver: Varlık dosyası (zil/arka plan) kaydedildi → %1").arg(path));
+        delete t;
+        return;
+    }
+
     if (!t->destIsTmp) {
 #if !defined(Q_OS_WIN)
         // ── Sahiplik: dosyayı gerçek kullanıcıya aktar (Linux) ──────────────
@@ -219,16 +235,6 @@ void FileReceiver::handleEnd(uint64_t seqId) {
             emit otaUpdateReady(path);
         }
         
-        delete t;
-        return;
-    }
-
-    if (t->destIsAsset) {
-        QFile::setPermissions(path,
-            QFile::ReadOwner | QFile::WriteOwner |
-            QFile::ReadGroup | QFile::ReadOther);
-        Logger::info(QObject::tr("FileReceiver: Varlık dosyası (zil/arka plan) kaydedildi → %1").arg(path));
-        // Arka plan varlık dosyaları için kullanıcıya diyalog/açma penceresi gösterilmez!
         delete t;
         return;
     }

@@ -1147,6 +1147,36 @@ bool AuthHandler::handle(const okidia::Envelope& env, Connection* conn, const QS
         return true;
     }
 
+    // ── DB_MASTER_DEVICE_DEL_REQ ───────────────────────────────────────────
+    if (env.type() == okidia::MessageType::DB_MASTER_DEVICE_DEL_REQ) {
+        okidia::DbMasterDeviceDeleteReq req;
+        okidia::DbMasterDeviceDeleteRes resp;
+        if (req.ParseFromString(env.payload())) {
+            if (m_ctx->isRequesterYM && m_ctx->isRequesterYM(conn)) {
+                const QString mid = QString::fromStdString(req.machine_id()).trimmed();
+                const QString host = QString::fromStdString(req.hostname()).trimmed();
+                if (OkidiaDatabase::instance().removeMasterDevice(mid, host)) {
+                    Logger::info(QObject::tr("Broker DB: Master bilgisayar kaydı silindi → %1 (%2)")
+                                 .arg(host.isEmpty() ? mid : host, mid));
+                    resp.set_success(true);
+                    if (m_ctx->broadcastDbSyncSignal) m_ctx->broadcastDbSyncSignal();
+                } else {
+                    resp.set_success(false);
+                    resp.set_error_msg(QObject::tr("Master bilgisayar kaydı silinemedi.").toStdString());
+                }
+            } else {
+                resp.set_success(false);
+                resp.set_error_msg(QObject::tr("Yetkisiz işlem (Sadece YM).").toStdString());
+            }
+
+            okidia::Envelope re;
+            re.set_type(okidia::MessageType::DB_MASTER_DEVICE_DEL_RES);
+            re.set_payload(resp.SerializeAsString());
+            conn->sendEnvelope(re);
+        }
+        return true;
+    }
+
     return false;
 }
 

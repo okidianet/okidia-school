@@ -73,6 +73,7 @@ public:
     void    setStreamingMode(bool streaming);
     void    setBrokerVersion(const QString& ver);
     bool    isSelected()  const { return m_state.selected; }
+    bool    hasValidFrame() const { return m_hasValidFrame; }
     int     frameWidth()  const { return m_frameBuffer.width(); }
     QString clientId()    const { return m_state.clientId; }
     ClientState state()   const { return m_state; }
@@ -117,6 +118,7 @@ private:
     int                  m_remoteWidth   = 0;
     int                  m_remoteHeight  = 0;
     bool                 m_isStreaming   = false;
+    bool                 m_hasValidFrame = false;
     QPoint               m_dragStartPos;   // ← YENİ: drag eşiği için
 };
 

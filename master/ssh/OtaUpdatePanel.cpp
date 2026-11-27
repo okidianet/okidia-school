@@ -41,6 +41,23 @@ OtaUpdatePanel::OtaUpdatePanel(SessionManager* session, QWidget* parent)
             refreshAgentList();
             onClientDisconnected(clientId);
         });
+        connect(m_session, &SessionManager::dbMasterDeviceDeleteResult, this, [this](bool success, const QString& errorMsg) {
+            if (!success) {
+                QMessageBox::warning(this, tr("Silme Hatası"),
+                    errorMsg.isEmpty() ? tr("Master bilgisayar kaydı silinemedi.") : errorMsg);
+            }
+        });
+        connect(m_session, &SessionManager::brokerDisconnected, this, [this]() {
+            if (m_statusLabel && !m_statusLabel->text().contains(tr("yeniden başlatılıyor"), Qt::CaseInsensitive)) {
+                m_statusLabel->setText(tr("Sunucu bağlantısı kesildi — yeniden bağlanılıyor..."));
+            }
+        });
+        connect(m_session, &SessionManager::switchedToOnlineMode, this, [this]() {
+            refreshAgentList();
+            if (m_statusLabel) {
+                m_statusLabel->setText(tr("Sunucu bağlantısı yeniden kuruldu. Paket listesi güncellendi."));
+            }
+        });
     }
 }
 
@@ -390,6 +407,8 @@ void OtaUpdatePanel::refreshAgentList() {
         }
         OkidiaTableItem* mHostItem = new OkidiaTableItem(hostText);
         mHostItem->setData(Qt::UserRole, mdev.hostname);
+        mHostItem->setData(Qt::UserRole + 1, mdev.machineId);
+        mHostItem->setData(Qt::UserRole + 2, isSelf);
         if (mdev.lastSeen > 0) {
             QString dateStr = QDateTime::fromSecsSinceEpoch(mdev.lastSeen).toString("dd.MM.yyyy HH:mm");
             mHostItem->setToolTip(tr("Bilgisayar Adı (Hostname): %1\nSon Görülme / Giriş: %2\nIP: %3\nSon Kullanıcı: %4")
@@ -1455,6 +1474,76 @@ void OtaUpdatePanel::onTableContextMenu(const QPoint& pos) {
         connect(brokerLogAct, &QAction::triggered, this, [this]() {
             openRemoteAgentLog("broker", QString(), tr("Broker Sunucusu"));
         });
+    } else if (isMasterRow && m_session && m_session->activeUser().role == "YM") {
+        // Seçili tüm silinebilir Master satırlarını topla (aktif yerel bilgisayar hariç)
+        QList<QPair<QString, QString>> targetsToDelete; // (machineId, hostname)
+        QSet<int> selectedRows;
+        for (const QModelIndex& idx : m_agentTable->selectionModel()->selectedRows()) {
+            selectedRows.insert(idx.row());
+        }
+        if (!selectedRows.contains(row)) {
+            selectedRows.clear();
+            selectedRows.insert(row);
+        }
+        for (int r : selectedRows) {
+            auto* hItm = m_agentTable->item(r, 1);
+            auto* aItm = m_agentTable->item(r, 4);
+            if (!hItm || !aItm) continue;
+            if (!aItm->data(Qt::UserRole).toString().startsWith("master:")) continue;
+            if (hItm->data(Qt::UserRole + 2).toBool()) continue; // (Bu Bilgisayar) korunur
+            const QString hName = hItm->data(Qt::UserRole).toString().trimmed();
+            const QString mId = hItm->data(Qt::UserRole + 1).toString().trimmed();
+            if (!hName.isEmpty() || !mId.isEmpty()) {
+                targetsToDelete.append(qMakePair(mId, hName));
+            }
+        }
+
+        if (targetsToDelete.isEmpty()) {
+            QAction* selfDisabledAct = menu.addAction(
+                ThemeManager::icon(":/ui/trash.svg"),
+                tr("Bu Bilgisayar Silinemez (Aktif Oturum)"));
+            selfDisabledAct->setEnabled(false);
+        } else {
+            const QString actLabel = (targetsToDelete.size() == 1)
+                ? tr("Master Bilgisayar Kaydını Sil (%1)").arg(targetsToDelete.first().second)
+                : tr("Seçili %1 Master Bilgisayar Kaydını Sil").arg(targetsToDelete.size());
+            QAction* delMasterAct = menu.addAction(
+                ThemeManager::icon(":/ui/trash.svg"),
+                actLabel);
+            connect(delMasterAct, &QAction::triggered, this, [this, targetsToDelete]() {
+                if (!m_session || !m_session->isConnected()) {
+                    QMessageBox::warning(this, tr("Hata"), tr("Sunucu (Broker) bağlantısı yok!"));
+                    return;
+                }
+                QStringList names;
+                for (const auto& pair : targetsToDelete) {
+                    names << (pair.second.isEmpty() ? pair.first : pair.second);
+                }
+                const QString msg = (targetsToDelete.size() == 1)
+                    ? tr("<b>%1</b> adlı Master bilgisayar kaydı veritabanından silinecek.<br><br>"
+                         "Bu bilgisayar hâlâ sistemde kullanılıyorsa, bir sonraki Master girişinde "
+                         "çift kayıt oluşturmadan otomatik olarak listeye yeniden eklenecektir.<br><br>"
+                         "Devam etmek istiyor musunuz?").arg(names.first().toHtmlEscaped())
+                    : tr("Seçili <b>%1</b> Master bilgisayar kaydı veritabanından silinecek:<br>"
+                         "<code>%2</code><br><br>"
+                         "Bu bilgisayarlardan hâlâ aktif olanlar, bir sonraki Master girişinde "
+                         "çift kayıt oluşturmadan otomatik olarak listeye yeniden eklenecektir.<br><br>"
+                         "Devam etmek istiyor musunuz?").arg(targetsToDelete.size()).arg(names.join(", ").toHtmlEscaped());
+
+                if (QMessageBox::question(this, tr("Master Bilgisayar Kaydını Sil"), msg,
+                                          QMessageBox::Yes | QMessageBox::No, QMessageBox::No) != QMessageBox::Yes) {
+                    return;
+                }
+
+                for (const auto& pair : targetsToDelete) {
+                    m_session->sendDbMasterDeviceDelete(pair.first, pair.second);
+                    AuditLog::instance().recordDeployment(
+                        {},
+                        pair.second.isEmpty() ? pair.first : pair.second,
+                        tr("Master bilgisayar kaydı OTA listesinden silindi"));
+                }
+            });
+        }
     }
 
     if (m_progressGrid && (!m_progressGrid->allCards().isEmpty() || m_progressGrid->hasSavedHistory())) {

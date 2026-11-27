@@ -4,6 +4,8 @@
 #include "../../common/utils/Logger.h"
 #include "../system/PersistentStateManager.h"
 #include "../system/SessionSwitchManager.h"
+#include "../system/SystemInfo.h"
+#include "../input/EvdevController.h"
 #include "../OtaUpdater.h"
 
 #include <QDir>
@@ -36,6 +38,10 @@ bool AgentIpcServer::start() {
     connect(m_localServer, &LocalServer::clientDisconnected, this, [this](LocalConnection* conn) {
         m_authenticatedClients.remove(conn);
         m_replayedClients.remove(conn);
+        if (m_inputHelperConn == conn) {
+            m_inputHelperConn = nullptr;
+            Logger::info(QObject::tr("Agent: Input helper IPC bağlantısı kapandı."));
+        }
     });
 
     connect(m_localServer, &LocalServer::envelopeReceived, this, &AgentIpcServer::handleEnvelopeFromTray);
@@ -54,15 +60,39 @@ void AgentIpcServer::broadcast(const okidia::Envelope& env) {
     }
 }
 
+bool AgentIpcServer::hasInputHelper() const {
+    return m_inputHelperConn && m_inputHelperConn->isConnected();
+}
+
+bool AgentIpcServer::sendToInputHelper(const okidia::Envelope& env) {
+    if (m_inputHelperConn && m_inputHelperConn->isConnected()) {
+        return m_inputHelperConn->sendEnvelope(env);
+    }
+    return false;
+}
+
 void AgentIpcServer::clearRemoteControlEnv() {
     m_remoteControlActive = false;
     m_lastTakeControlEnv.Clear();
-    m_lastFpsSetEnv.Clear();
     m_lastScreenSelectEnv.Clear();
+
+    // Tam ekran uzak kontrol kapatıldığında m_lastFpsSetEnv tamamen silinmemeli;
+    // varsayılan thumbnail akış ayarına (1000 ms) döndürülmeli ki oturum geçişlerinde
+    // (örn. kullanıcı oturumu kapatıp GDM ekranına düştüğünde) yeni tray'de screenTimer başlasın.
+    okidia::ScreenConfig cfg;
+    cfg.set_interval_ms(1000);
+    cfg.set_jpeg_quality(60);
+    cfg.set_max_width(0);
+    m_lastFpsSetEnv.set_type(okidia::MessageType::SCREEN_FPS_SET);
+    m_lastFpsSetEnv.set_payload(cfg.SerializeAsString());
 }
 
 void AgentIpcServer::replayActiveStateToTray(LocalConnection* conn) {
     if (!conn || !conn->isConnected()) return;
+
+    if (!m_lastAgentTypeEnv.payload().empty()) {
+        conn->sendEnvelope(m_lastAgentTypeEnv);
+    }
 
     if (PersistentStateManager::isScreenLocked()) {
         uint32_t pol = PersistentStateManager::screenLockPolicy();
@@ -77,9 +107,15 @@ void AgentIpcServer::replayActiveStateToTray(LocalConnection* conn) {
             conn->sendEnvelope(lockEnv);
             Logger::info(QObject::tr("Agent: Kalıcı ekran kilidi tray'e re-play edildi (Policy: %1).")
                          .arg(cmd.lock_policy()));
+            if (pol == 1 && EvdevController::isWaylandSessionActive()) {
+                EvdevController::instance().lockInput();
+            }
         }
     }
     if (PersistentStateManager::isInputLocked()) {
+        if (EvdevController::isWaylandSessionActive()) {
+            EvdevController::instance().lockInput();
+        }
         okidia::Envelope lockEnv;
         lockEnv.set_type(okidia::MessageType::INPUT_LOCK);
         conn->sendEnvelope(lockEnv);
@@ -91,6 +127,15 @@ void AgentIpcServer::replayActiveStateToTray(LocalConnection* conn) {
     }
     if (!m_lastFpsSetEnv.payload().empty()) {
         conn->sendEnvelope(m_lastFpsSetEnv);
+    } else {
+        okidia::ScreenConfig cfg;
+        cfg.set_interval_ms(1000);
+        cfg.set_jpeg_quality(60);
+        cfg.set_max_width(0);
+        okidia::Envelope fpsEnv;
+        fpsEnv.set_type(okidia::MessageType::SCREEN_FPS_SET);
+        fpsEnv.set_payload(cfg.SerializeAsString());
+        conn->sendEnvelope(fpsEnv);
     }
     if (m_remoteControlActive) {
         Logger::info(QObject::tr("Agent: Uzak kontrol state'i tray'e re-play ediliyor (CLIENT_INFO sonrası)..."));
@@ -149,12 +194,16 @@ void AgentIpcServer::handleEnvelopeFromTray(LocalConnection* sender, const okidi
         }
     }
 
-    if (m_tls->isAnonymous()) return;
-
     if (env.type() == okidia::MessageType::CLIENT_INFO) {
         okidia::ClientInfo ci;
         if (ci.ParseFromString(env.payload())) {
             const QString user = QString::fromStdString(ci.username());
+            if (user.compare(QStringLiteral("input-helper"), Qt::CaseInsensitive) == 0) {
+                m_inputHelperConn = sender;
+                m_localServer->setUserForConnection(sender, QStringLiteral("input-helper"));
+                Logger::info(QObject::tr("Agent: UIPI-üstü girdi yardımcısı (input-helper) IPC üzerinden bağlandı."));
+                return;
+            }
             m_localServer->setUserForConnection(sender, user);
             if (ci.screen_width() > 0 && ci.screen_height() > 0) {
                 m_lastKnownScreenW = ci.screen_width();
@@ -162,6 +211,8 @@ void AgentIpcServer::handleEnvelopeFromTray(LocalConnection* sender, const okidi
             }
             Logger::info(QObject::tr("Agent: Tray kullanıcısı eşlendi → ") + user + 
                          QString(" (%1x%2)").arg(m_lastKnownScreenW).arg(m_lastKnownScreenH));
+
+            emit activeTrayReady(sender, user);
 
             if (!m_replayedClients.contains(sender)) {
                 m_replayedClients.insert(sender);
@@ -171,6 +222,10 @@ void AgentIpcServer::handleEnvelopeFromTray(LocalConnection* sender, const okidi
             }
         }
     }
+
+    // Anonymous (sertifikasız) modda Broker'a yalnızca discovery/zaman senkronu gider;
+    // ancak yerel Tray kullanıcı eşleştirmesi yukarıda yapılmış olmalıdır.
+    if (m_tls->isAnonymous()) return;
 
     if (env.type() == okidia::MessageType::SCREEN_TILE_UPDATE ||
         env.type() == okidia::MessageType::SCREEN_FRAME ||
@@ -226,8 +281,34 @@ void AgentIpcServer::handleEnvelopeFromTray(LocalConnection* sender, const okidi
         }
     }
 
-    if (m_tls->isConnected() && m_tls->connection())
+    if (m_tls->isConnected() && m_tls->connection()) {
+#if defined(Q_OS_WIN)
+        // Kilitli bir kullanıcı oturumunda (ARSO / Win+L) winlogon tray'i aktif görüntü/girdi
+        // sağlarken Master'daki gerçek kullanıcı adını "winlogon" ile ezme.
+        if (env.type() == okidia::MessageType::CLIENT_INFO) {
+            okidia::ClientInfo ci;
+            if (ci.ParseFromString(env.payload())) {
+                const QString reported = SystemInfo::activeDisplayUser();
+                const QString trayUser = QString::fromStdString(ci.username());
+                if (SystemInfo::isDmUser(trayUser) && !reported.isEmpty() && !SystemInfo::isDmUser(reported)) {
+                    ci.set_username(reported.toStdString());
+                    ci.set_display_name(SystemInfo::userDisplayName(reported).toStdString());
+                    okidia::Envelope patched = env;
+                    patched.set_payload(ci.SerializeAsString());
+                    m_tls->connection()->sendEnvelope(patched);
+                } else {
+                    m_tls->connection()->sendEnvelope(env);
+                }
+            } else {
+                m_tls->connection()->sendEnvelope(env);
+            }
+        } else {
+            m_tls->connection()->sendEnvelope(env);
+        }
+#else
         m_tls->connection()->sendEnvelope(env);
+#endif
+    }
 
     if (env.type() == okidia::MessageType::AGENT_TYPE_SET_RESULT) {
         okidia::AgentTypeSetResult res;

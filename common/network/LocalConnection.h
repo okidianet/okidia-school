@@ -96,8 +96,11 @@ public:
     void             setActiveUser(const QString& username);
     QString          activeUser()       const { return m_activeUser; }
 
-    // Aktif kullanıcının LocalConnection'ı (eşleşme yoksa nullptr)
+    // Aktif kullanıcının LocalConnection'ı (eşleşme yoksa fallback)
     LocalConnection* activeConnection() const;
+
+    // Yalnızca aktif kullanıcıyla birebir eşleşen LocalConnection (pasif oturuma düşmez)
+    LocalConnection* exactActiveConnection() const;
 
 signals:
     void clientConnected(LocalConnection* conn);

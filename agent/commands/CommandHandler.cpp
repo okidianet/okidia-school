@@ -164,6 +164,17 @@ void CommandHandler::handleEnvelope(const okidia::Envelope& envelope) {
         break;
     }
 
+    case okidia::MessageType::AUDIO_STOP:
+    case okidia::MessageType::AUDIO_BROADCAST_STOP: {
+        QString stopId;
+        okidia::AudioBroadcastCommand stopCmd;
+        if (!envelope.payload().empty() && stopCmd.ParseFromString(envelope.payload())) {
+            stopId = QString::fromStdString(stopCmd.announce_id());
+        }
+        audioStopAll(stopId);
+        break;
+    }
+
     case okidia::MessageType::AUDIO_SET_VOLUME: {
         okidia::AudioVolumeCommand cmd;
         cmd.ParseFromString(envelope.payload());

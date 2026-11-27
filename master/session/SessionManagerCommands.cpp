@@ -1045,6 +1045,20 @@ bool SessionManager::sendDbTeacherDelete(const QString& teacherId) {
     return m_conn->sendEnvelope(env);
 }
 
+bool SessionManager::sendDbMasterDeviceDelete(const QString& machineId, const QString& hostname) {
+    if (!m_conn || !m_conn->isConnected()) return false;
+    okidia::DbMasterDeviceDeleteReq req;
+    req.set_machine_id(machineId.toStdString());
+    req.set_hostname(hostname.toStdString());
+
+    okidia::Envelope env;
+    env.set_type(okidia::MessageType::DB_MASTER_DEVICE_DEL_REQ);
+    env.set_payload(req.SerializeAsString());
+    Logger::info(QObject::tr("SessionManager: Master bilgisayar silme isteği gönderiliyor -> %1 (%2)")
+                 .arg(hostname.isEmpty() ? machineId : hostname, machineId));
+    return m_conn->sendEnvelope(env);
+}
+
 bool SessionManager::sendTeacherKeySyncToAll() {
     if (!m_conn || !m_conn->isConnected()) return false;
     QList<TeacherRecord> teachers = OkidiaDatabase::instance().allTeachers();

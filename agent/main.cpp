@@ -4,14 +4,25 @@
 
 #include <QCoreApplication>
 #include <QCommandLineParser>
+#include <QFile>
 #include <QLocale>
+#include <QTimer>
 #include <iostream>
 
 #if defined(Q_OS_WIN)
 #  ifndef WIN32_LEAN_AND_MEAN
 #    define WIN32_LEAN_AND_MEAN
 #  endif
+#  ifndef NOMINMAX
+#    define NOMINMAX
+#  endif
 #  include <windows.h>
+#  ifdef MOUSE_EVENT
+#    undef MOUSE_EVENT
+#  endif
+#  ifdef KEY_EVENT
+#    undef KEY_EVENT
+#  endif
 
 // MinGW GCC / Qt6Core TLS null-pointer destructors exception filter:
 // Qt6Core'da iş parçacığı sonlanırken (LdrShutdownThread) QSystemLocale TLS yıkıcısı,
@@ -69,11 +80,137 @@ static LONG WINAPI QtTlsCrashFilter(PEXCEPTION_POINTERS pEx) {
 #endif
 
 #include "core/AgentApp.h"
+#include "input/InputController.h"
 #include "system/SystemInfo.h"
+#include "../common/network/LocalConnection.h"
 #include "../common/utils/PlatformService.h"
 #include "../common/utils/Logger.h"
 #include "../common/OkidiaConfig.h"
 #include "../common/version/OkidiaVersion.h"
+
+static int runInputHelper(int argc, char* argv[]) {
+    QString cliIpcToken;
+    for (int i = 1; i < argc - 1; ++i) {
+        if (QString::fromLocal8Bit(argv[i]) == QLatin1String("--ipc-token")) {
+            cliIpcToken = QString::fromLocal8Bit(argv[i + 1]);
+        }
+    }
+
+#if defined(Q_OS_WIN)
+    qunsetenv("QT_QPA_PLATFORM");
+    QLocale::setDefault(QLocale::c());
+
+    // Fiziksel piksel koordinatlarının okidia-tray.exe (Qt GUI) ile 1:1 eşleşmesi için
+    // Per-Monitor V2 DPI farkındalığını etkinleştir.
+    if (HMODULE hUser32 = GetModuleHandleW(L"user32.dll")) {
+        typedef BOOL(WINAPI* SetProcessDpiAwarenessContextFn)(HANDLE);
+        auto pSetDpiCtx = reinterpret_cast<SetProcessDpiAwarenessContextFn>(
+            GetProcAddress(hUser32, "SetProcessDpiAwarenessContext"));
+        if (pSetDpiCtx) {
+            // DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 = (DPI_AWARENESS_CONTEXT)-4
+            pSetDpiCtx(reinterpret_cast<HANDLE>(static_cast<intptr_t>(-4)));
+        } else {
+            SetProcessDPIAware();
+        }
+    }
+
+    HANDLE hHelperMutex = CreateMutexW(NULL, TRUE, L"Global\\OkidiaInputHelperLock");
+    if (hHelperMutex && GetLastError() == ERROR_ALREADY_EXISTS) {
+        CloseHandle(hHelperMutex);
+        return 0;
+    }
+#endif
+
+    QCoreApplication app(argc, argv);
+    app.setOrganizationName("okidia");
+    app.setApplicationName("agent-input-helper");
+    app.setApplicationVersion(Okidia::Version::string());
+
+    Logger::init(OkidiaConfig::logDir() + "/okidia-input-helper.log");
+    Logger::info(QObject::tr("InputHelper: UIPI-üstü girdi yardımcısı başlatıldı."));
+
+    auto getCurrentIpcToken = [cliIpcToken]() -> QString {
+        const QString tokenPath = OkidiaConfig::runDir() + "/ipc_token";
+        QFile tokenFile(tokenPath);
+        if (tokenFile.open(QIODevice::ReadOnly)) {
+            QString diskToken = QString::fromUtf8(tokenFile.readAll()).trimmed();
+            tokenFile.close();
+            if (!diskToken.isEmpty()) {
+                return diskToken;
+            }
+        }
+        return cliIpcToken;
+    };
+
+    const QString socketPath = OkidiaConfig::runDir() + "/agent.sock";
+    auto* localConn = new LocalConnection(socketPath, &app);
+
+    // 10 saniye içinde servise bağlanamazsa yetim kalmamak için kapan
+    auto* connectWatchdog = new QTimer(&app);
+    connectWatchdog->setSingleShot(true);
+    QObject::connect(connectWatchdog, &QTimer::timeout, &app, [&app, localConn]() {
+        if (!localConn->isConnected()) {
+            Logger::warning(QObject::tr("InputHelper: Agent servisine 10 sn içinde bağlanılamadı, çıkılıyor."));
+            app.quit();
+        }
+    });
+    connectWatchdog->start(10000);
+
+    QObject::connect(localConn, &LocalConnection::connected, &app, [localConn, getCurrentIpcToken, connectWatchdog]() {
+        connectWatchdog->stop();
+        Logger::info(QObject::tr("InputHelper: Agent IPC soketine bağlandı."));
+
+        const QString activeToken = getCurrentIpcToken();
+        if (!activeToken.isEmpty()) {
+            okidia::Envelope tokenEnv;
+            tokenEnv.set_type(okidia::MessageType::AGENT_IPC_HANDSHAKE);
+            tokenEnv.set_payload(activeToken.toUtf8().toStdString());
+            localConn->sendEnvelope(tokenEnv);
+        }
+
+        okidia::ClientInfo ci;
+        ci.set_username("input-helper");
+        okidia::Envelope ciEnv;
+        ciEnv.set_type(okidia::MessageType::CLIENT_INFO);
+        ciEnv.set_payload(ci.SerializeAsString());
+        localConn->sendEnvelope(ciEnv);
+    });
+
+    QObject::connect(localConn, &LocalConnection::disconnected, &app, [&app]() {
+        Logger::info(QObject::tr("InputHelper: Agent IPC bağlantısı kesildi, yardımcı sonlandırılıyor."));
+        app.quit();
+    });
+
+    QObject::connect(localConn, &LocalConnection::envelopeReceived, &app, [&app](const okidia::Envelope& env) {
+        if (env.type() == okidia::MessageType::MOUSE_EVENT) {
+            okidia::MouseEvent evt;
+            if (evt.ParseFromString(env.payload())) {
+                if (evt.is_move()) {
+                    InputController::injectMouseMove(evt.x(), evt.y());
+                } else if (evt.is_scroll()) {
+                    InputController::injectMouseScroll(evt.delta());
+                } else {
+                    InputController::injectMouseClick(evt.button(), evt.pressed(), evt.x(), evt.y());
+                }
+            }
+        } else if (env.type() == okidia::MessageType::KEY_EVENT) {
+            okidia::KeyEvent evt;
+            if (evt.ParseFromString(env.payload())) {
+                InputController::injectKeyEvent(evt.keysym(), evt.pressed());
+            }
+        } else if (env.type() == okidia::MessageType::REMOTE_CONTROL_STOP) {
+            Logger::info(QObject::tr("InputHelper: REMOTE_CONTROL_STOP alındı, yardımcı temizce kapanıyor."));
+            app.quit();
+        }
+    });
+
+    localConn->connectToServer();
+    const int ret = app.exec();
+#if defined(Q_OS_WIN)
+    if (hHelperMutex) CloseHandle(hHelperMutex);
+#endif
+    return ret;
+}
 
 static int runAgentApp(int argc, char* argv[]) {
 #if defined(Q_OS_WIN)
@@ -125,6 +262,14 @@ static int runAgentApp(int argc, char* argv[]) {
 }
 
 int main(int argc, char* argv[]) {
+    bool isInputHelper = false;
+    for (int i = 1; i < argc; ++i) {
+        if (QString::fromLocal8Bit(argv[i]) == QLatin1String("--input-helper")) {
+            isInputHelper = true;
+            break;
+        }
+    }
+
 #if defined(Q_OS_WIN)
     AddVectoredExceptionHandler(1, QtTlsCrashFilter);
 
@@ -135,8 +280,16 @@ int main(int argc, char* argv[]) {
     qunsetenv("QT_QPA_PLATFORM");
     QLocale::setDefault(QLocale::c());
 
+    if (isInputHelper) {
+        return runInputHelper(argc, argv);
+    }
+
     if (PlatformService::isRunningAsService()) {
         return PlatformService::runAsService(QStringLiteral("OkidiaAgent"), runAgentApp, argc, argv) ? 0 : 1;
+    }
+#else
+    if (isInputHelper) {
+        return runInputHelper(argc, argv);
     }
 #endif
     return runAgentApp(argc, argv);

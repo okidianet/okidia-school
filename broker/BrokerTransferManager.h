@@ -38,11 +38,12 @@ public:
     bool handleAssetBegin(uint64_t seqId, const okidia::FileTransferBegin& begin);
     bool handleAssetChunk(uint64_t seqId, const okidia::FileTransferChunk& chunk);
     bool handleAssetEnd(uint64_t seqId);
-    void syncAssetsToClient(Connection* agentConn, int agentType);
+    void enqueueAssetSync(Connection* agentConn, const QString& clientId, int agentType, const QString& clientAssetsFingerprint = QString());
 
 private slots:
     void onClientRegistered(const QString& clientId);
     void onOtaQueueTimeout();
+    void onAssetSyncTimerTick();
 
 private:
     void broadcastOtaPush(const QString& osTag, const QString& version, uint64_t fileSize);
@@ -81,6 +82,31 @@ private:
         QFile* file = nullptr;
     };
 
+    struct AssetPushItem {
+        QString fullPath;
+        QString targetName;
+        QString mimeType;
+    };
+
+    struct AssetSyncJob {
+        QPointer<Connection> conn;
+        QString              clientId;
+        QList<AssetPushItem> remainingItems;
+        QFile*               currentFile = nullptr;
+        uint64_t             currentSeqId = 0;
+        uint32_t             chunkIdx = 0;
+        bool                 beginSent = false;
+    };
+
+    struct QueuedAssetSync {
+        QPointer<Connection> conn;
+        QString              clientId;
+    };
+
+    void processAssetSyncQueue();
+    void cleanupAssetSyncJob(AssetSyncJob* job);
+    void refreshAssetsFingerprint();
+
     struct SentUpdateRecord {
         QString targetVersion;
         qint64  timestampSec = 0;
@@ -89,6 +115,13 @@ private:
 
     QMap<Connection*, ActiveTransfer*>   m_transfers;
     QMap<uint64_t, ActiveAssetTransfer*> m_assetTransfers;
+    QList<QueuedAssetSync>               m_pendingAssetSyncQueue;
+    QList<AssetSyncJob*>                 m_activeAssetSyncJobs;
+    QHash<Connection*, QString>          m_syncedAssetConns;
+    QString                              m_brokerAssetsFingerprint;
+    QTimer*                              m_assetSyncTimer = nullptr;
+    static constexpr int                 kMaxConcurrentAssetSync = 3;
+    static constexpr qint64              kAssetSyncBackpressureBytes = 256 * 1024;
     QMap<QString, SentUpdateRecord>    m_sentAgentUpdates;
     QList<QueuedOtaTarget>             m_pendingOtaQueue;
     QMap<QString, qint64>              m_activeOtaClients;

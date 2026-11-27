@@ -43,6 +43,9 @@ public:
     // autoReconnect bayrağını kapatmaz.
     void forceReconnect();
 
+    // Keşif aşamasında erişilemeyen hedef IP kilidini temizler (autoReconnect bayrağına dokunmaz).
+    void clearTargetHost();
+
     bool isConnected() const;
     bool isConnecting() const { return m_socket && (m_socket->state() == QAbstractSocket::ConnectingState || m_socket->state() == QAbstractSocket::HostLookupState); }
     QString host() const { return m_host; }

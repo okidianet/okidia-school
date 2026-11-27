@@ -948,10 +948,15 @@ public:
      * Kullanıcı adının bir Display Manager (DM / Login ekranı) kullanıcısı olup olmadığını tespit eder.
      */
     static bool isDmUser(const QString& username) {
+        const QString u = username.toLower().trimmed();
+        if (u.isEmpty()) return true;
+        if (u.startsWith(QStringLiteral("gdm")) || u.contains(QStringLiteral("greeter"))) {
+            return true;
+        }
         static const QSet<QString> dmUsers = {
-            "lightdm", "gdm", "gdm3", "sddm", "kdm", "lxdm", "xdm", "slim", "winlogon"
+            "lightdm", "gdm", "gdm3", "debian-gdm", "sddm", "kdm", "lxdm", "xdm", "slim", "winlogon"
         };
-        return dmUsers.contains(username.toLower().trimmed());
+        return dmUsers.contains(u);
     }
 
     /**
@@ -978,16 +983,56 @@ public:
     }
 
     /**
+     * Uzak dosya yollarındaki tüm '\' karakterlerini platformdan bağımsız olarak '/' karakterine çevirir
+     * ve ardışık '//' tekrarlarını tekil '/' haline getirir.
+     * (Not: QDir::fromNativeSeparators Linux'ta '\' karakterlerine dokunmadığı için uzak yollarda kullanılmamalıdır.)
+     */
+    static QString fromRemotePathSeparators(const QString& path) {
+        QString p = path.trimmed();
+        p.replace('\\', '/');
+        while (p.contains(QStringLiteral("//"))) {
+            p.replace(QStringLiteral("//"), QStringLiteral("/"));
+        }
+        // "/C:/..." biçimindeki SFTP yollarında sürücü harfi önündeki "/" karakterini kaldır
+        if (p.size() >= 3 && p[0] == '/' && p[1].isLetter() && p[2] == ':') {
+            p.remove(0, 1);
+        }
+        return p;
+    }
+
+    /**
+     * Uzak Windows komutları (cmd.exe / PowerShell) için yolu platformdan bağımsız olarak
+     * temiz Windows ters eğik çizgi ('\') formatına dönüştürür ve çift '\\' (UNC hatası) oluşumunu engeller.
+     */
+    static QString toRemoteWindowsPath(const QString& path) {
+        QString p = fromRemotePathSeparators(path);
+        p.replace('/', '\\');
+        while (p.contains(QStringLiteral("\\\\"))) {
+            p.replace(QStringLiteral("\\\\"), QStringLiteral("\\"));
+        }
+        if (p.size() == 2 && p[0].isLetter() && p[1] == ':') {
+            p += '\\';
+        }
+        while (p.size() > 3 && p.endsWith('\\')) {
+            p.chop(1);
+        }
+        return p;
+    }
+
+    /**
      * Uzak dosya yollarını temizler, karışık / ve \ karakterlerini işletim sistemine göre standartlaştırır.
      * @param forDisplay true ise Windows için native ters eğik çizgi ('\') formatına dönüştürür.
      */
     static QString normalizeRemotePath(const QString& path, bool isWindows, bool forDisplay = false) {
-        QString clean = QDir::cleanPath(QDir::fromNativeSeparators(path.trimmed()));
+        QString clean = QDir::cleanPath(fromRemotePathSeparators(path));
         if (isWindows) {
+            if (clean.size() >= 3 && clean[0] == '/' && clean[1].isLetter() && clean[2] == ':') {
+                clean.remove(0, 1);
+            }
             if (clean.endsWith(':')) clean += "/";
             if (clean.isEmpty()) clean = "C:/";
             if (forDisplay) {
-                return QDir::toNativeSeparators(clean);
+                return toRemoteWindowsPath(clean);
             }
             return clean;
         } else {
@@ -1001,11 +1046,11 @@ public:
      */
     static QString remoteMkdirCmd(const QString& path, bool isWindows) {
         if (isWindows) {
-            QString native = QDir::toNativeSeparators(path);
-            native.replace("\"", "\\\"");
+            QString native = toRemoteWindowsPath(path);
+            native.replace("\"", "");
             return QString("cmd.exe /c mkdir \"%1\"").arg(native);
         } else {
-            QString esc = path;
+            QString esc = fromRemotePathSeparators(path);
             esc.replace("\"", "\\\"");
             return QString("mkdir -p \"%1\"").arg(esc);
         }
@@ -1016,14 +1061,14 @@ public:
      */
     static QString remoteMoveCmd(const QString& srcPath, const QString& dstPath, bool isWindows) {
         if (isWindows) {
-            QString nativeSrc = QDir::toNativeSeparators(srcPath);
-            QString nativeDst = QDir::toNativeSeparators(dstPath);
-            nativeSrc.replace("\"", "\\\"");
-            nativeDst.replace("\"", "\\\"");
+            QString nativeSrc = toRemoteWindowsPath(srcPath);
+            QString nativeDst = toRemoteWindowsPath(dstPath);
+            nativeSrc.replace("\"", "");
+            nativeDst.replace("\"", "");
             return QString("cmd.exe /c move /Y \"%1\" \"%2\"").arg(nativeSrc, nativeDst);
         } else {
-            QString escSrc = srcPath;
-            QString escDst = dstPath;
+            QString escSrc = fromRemotePathSeparators(srcPath);
+            QString escDst = fromRemotePathSeparators(dstPath);
             escSrc.replace("\"", "\\\"");
             escDst.replace("\"", "\\\"");
             return QString("mv \"%1\" \"%2\"").arg(escSrc, escDst);
@@ -1035,12 +1080,12 @@ public:
      */
     static QString remoteDeleteCmd(const QString& path, bool isDir, bool isWindows) {
         if (isWindows) {
-            QString native = QDir::toNativeSeparators(path);
-            native.replace("\"", "\\\"");
+            QString native = toRemoteWindowsPath(path);
+            native.replace("\"", "");
             return isDir ? QString("cmd.exe /c rmdir /s /q \"%1\"").arg(native)
                          : QString("cmd.exe /c del /f /q \"%1\"").arg(native);
         } else {
-            QString esc = path;
+            QString esc = fromRemotePathSeparators(path);
             esc.replace("\"", "\\\"");
             return isDir ? QString("rm -rf \"%1\"").arg(esc)
                          : QString("rm -f \"%1\"").arg(esc);
@@ -1112,9 +1157,9 @@ public:
     static QString remoteTarCompressCmd(const QString& archivePath, const QString& parentDir, const QString& folderName, bool isWindows) {
         if (isWindows) {
             return QString("cmd.exe /c tar -czf \"%1\" -C \"%2\" \"%3\"")
-                    .arg(QDir::toNativeSeparators(archivePath), QDir::toNativeSeparators(parentDir), folderName);
+                    .arg(toRemoteWindowsPath(archivePath), toRemoteWindowsPath(parentDir), folderName);
         } else {
-            QString rParentEscaped = parentDir; rParentEscaped.replace("\"", "\\\"");
+            QString rParentEscaped = fromRemotePathSeparators(parentDir); rParentEscaped.replace("\"", "\\\"");
             return QString("tar -czf %1 -C \"%2\" \"%3\"").arg(archivePath, rParentEscaped, folderName);
         }
     }
@@ -1124,17 +1169,17 @@ public:
      */
     static QString remoteTarExtractCmd(const QString& archivePath, const QString& destDir, bool isWindows, bool overwrite = true, const QString& renameTarget = QString(), const QString& uuid = QString()) {
         if (isWindows) {
-            QString natArchive = QDir::toNativeSeparators(archivePath);
-            QString natDest = QDir::toNativeSeparators(destDir);
+            QString natArchive = toRemoteWindowsPath(archivePath);
+            QString natDest = toRemoteWindowsPath(destDir);
             QString cmd;
             if (overwrite && renameTarget.isEmpty()) {
                 cmd += QString("cmd.exe /c rmdir /s /q \"%1\" & ").arg(natDest);
             }
             if (!renameTarget.isEmpty()) {
                 QString tmpExt = "C:/Windows/Temp/okidia_ext_" + uuid;
-                QString natTmp = QDir::toNativeSeparators(tmpExt);
+                QString natTmp = toRemoteWindowsPath(tmpExt);
                 cmd += QString("cmd.exe /c mkdir \"%1\" & tar -xzf \"%2\" -C \"%1\" & move /Y \"%1\\%3\" \"%4\" & rmdir /s /q \"%1\" & del /f /q \"%2\"")
-                        .arg(natTmp, natArchive, destDir, QDir::toNativeSeparators(renameTarget));
+                        .arg(natTmp, natArchive, destDir, toRemoteWindowsPath(renameTarget));
             } else {
                 cmd += QString("cmd.exe /c tar -xzf \"%1\" -C \"%2\" & del /f /q \"%1\"").arg(natArchive, natDest);
             }
@@ -1142,7 +1187,7 @@ public:
         } else {
             QString cmd;
             if (overwrite && renameTarget.isEmpty()) {
-                QString rDestEscaped = destDir; rDestEscaped.replace("\"", "\\\"");
+                QString rDestEscaped = fromRemotePathSeparators(destDir); rDestEscaped.replace("\"", "\\\"");
                 cmd += QString("rm -rf \"%1\" && ").arg(rDestEscaped);
             }
             if (!renameTarget.isEmpty()) {
@@ -1150,7 +1195,7 @@ public:
                 cmd = QString("mkdir -p %1 && tar -xzf %2 -C %1 && mv %1/\"%3\" \"%4\" && rm -rf %1 && rm -f %2")
                         .arg(tmpExt, archivePath, destDir, renameTarget);
             } else {
-                QString rDestEscaped = destDir; rDestEscaped.replace("\"", "\\\"");
+                QString rDestEscaped = fromRemotePathSeparators(destDir); rDestEscaped.replace("\"", "\\\"");
                 cmd += QString("tar -xzf %1 -C \"%2\" && rm -f %1").arg(archivePath, rDestEscaped);
             }
             return cmd;
@@ -1162,7 +1207,7 @@ public:
      */
     static QString remoteReadLogCmd(const QString& logPath, bool isWindows) {
         if (isWindows) {
-            QString native = QDir::toNativeSeparators(logPath);
+            QString native = toRemoteWindowsPath(logPath);
             return QString("type \"%1\" 2>nul").arg(native);
         } else {
             return QString("cat \"%1\" 2>/dev/null").arg(logPath);
@@ -1189,11 +1234,11 @@ public:
 #if defined(Q_OS_WIN)
         switch (action) {
             case PowerAction::Shutdown:
-                return {"shutdown.exe", {"/s", "/t", QString::number(delaySec)}};
+                return {"shutdown.exe", {"/s", "/f", "/t", QString::number(delaySec)}};
             case PowerAction::Reboot:
-                return {"shutdown.exe", {"/r", "/t", QString::number(delaySec)}};
+                return {"shutdown.exe", {"/r", "/f", "/t", QString::number(delaySec)}};
             case PowerAction::Logout:
-                return {"shutdown.exe", {"/l"}};
+                return {"shutdown.exe", {"/l", "/f"}};
             case PowerAction::Suspend:
                 return {"rundll32.exe", {"powrprof.dll,SetSuspendState", "0,1,0"}};
         }

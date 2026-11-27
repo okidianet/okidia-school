@@ -47,6 +47,23 @@ case "$1" in
 
     # ── okidia-agent ───────────────────────────────────────────────────────
     if echo "$PACKAGE" | grep -q "okidia-agent"; then
+        # Kaldırma sırasında aktif GNOME Shell oturumlarında (GDM dahil) okidia-kiosk eklentisini
+        # devre dışı bırak ki disable() metodu çalışarak çalışma anı değişikliklerini geri alsın
+        if [ "$1" = "remove" ] || [ "$1" = "deconfigure" ]; then
+            for rt_dir in /run/user/*; do
+                if [ -S "$rt_dir/bus" ]; then
+                    rt_uid=$(stat -c '%u' "$rt_dir" 2>/dev/null)
+                    rt_gid=$(stat -c '%g' "$rt_dir" 2>/dev/null)
+                    if [ -n "$rt_uid" ] && [ "$rt_uid" != "0" ] && command -v setpriv &>/dev/null; then
+                        setpriv --reuid="$rt_uid" --regid="$rt_gid" --clear-groups /bin/sh -c \
+                            "HOME='$rt_dir' XDG_RUNTIME_DIR='$rt_dir' DBUS_SESSION_BUS_ADDRESS='unix:path=$rt_dir/bus' \
+                             gdbus call --session --dest org.gnome.Shell.Extensions --object-path /org/gnome/Shell/Extensions \
+                             --method org.gnome.Shell.Extensions.DisableExtension 'okidia-kiosk@okidia.net' >/dev/null 2>&1 || true" 2>/dev/null || true
+                    fi
+                fi
+            done
+        fi
+
         if command -v systemctl &>/dev/null; then
             if systemctl is-active --quiet okidia-agent-recover.service 2>/dev/null; then
                 systemctl stop okidia-agent-recover.service || true

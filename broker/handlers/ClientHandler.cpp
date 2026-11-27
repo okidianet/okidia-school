@@ -79,6 +79,7 @@ bool ClientHandler::handle(const okidia::Envelope& env, Connection* conn, const 
         m_ctx->registry->registerClient(clientId, client);
         if (m_ctx->broadcastStatus) m_ctx->broadcastStatus();
         if (m_ctx->multicast) m_ctx->multicast->handleClientReconnect(clientId);
+        if (m_ctx->syncChatMuteForClient) m_ctx->syncChatMuteForClient(clientId);
 
         // Ajanın kendi yolladığı IP yanıltıcı olabilir (NAT vb.), her zaman gerçek soket IP'sini zorla
         QString ipStr = conn->peerAddress();
@@ -195,10 +196,13 @@ bool ClientHandler::handle(const okidia::Envelope& env, Connection* conn, const 
         }
 
         // Tip 3 (Akıllı Tahta) ve Tip 1/0 bağlandığında merkezi zil ve okul varlıklarını otonom senkronize et
+        // (QPointer ile güvenli yaşam döngüsü + parmak izi/kuyruk/backpressure koruması)
         if (rec.agentType != 2 && m_ctx->transferManager) {
-            QTimer::singleShot(1500, m_ctx->transferManager, [ctx = m_ctx, conn, agentType = rec.agentType]() {
-                if (conn && conn->isConnected() && ctx->transferManager) {
-                    ctx->transferManager->syncAssetsToClient(conn, agentType);
+            QPointer<Connection> safeConn(conn);
+            const QString agentAssetFp = QString::fromStdString(info.assets_fingerprint());
+            QTimer::singleShot(1500, m_ctx->transferManager, [ctx = m_ctx, safeConn, clientId, agentType = rec.agentType, agentAssetFp]() {
+                if (safeConn && safeConn->isConnected() && ctx->transferManager) {
+                    ctx->transferManager->enqueueAssetSync(safeConn.data(), clientId, agentType, agentAssetFp);
                 }
             });
         }

@@ -92,10 +92,12 @@ Yönetilen bilgisayarlarda işletim sistemi seviyesinde çalışan modüldür.
 *   [DiscoveryService.h](../agent/network/DiscoveryService.h) / [.cpp](../agent/network/DiscoveryService.cpp): Ajanın yerel ağda mDNS üzerinden Broker'ı arama, OpenSSL ile CSR üretimi ve ilk katılım isteklerini (`DISCOVERY_REQUEST`) yalıtılmış olarak yöneten servis.
 
 ### 3.3 `agent/capture/` (Ekran Yakalama)
-*   [ScreenCapture.h](../agent/capture/ScreenCapture.h) / [.cpp](../agent/capture/ScreenCapture.cpp): Ekran görüntüsünü alıp sıkıştıran, yalnızca değişen alanları (**dirty tiles**) tespit edip gönderen performanslı ekran yakalama motoru. Linux X11/Qt ve Windows Win32 GDI nesne havuzuna (HDC/HBITMAP reuse) sahiptir. Akış yeniden başladığında tam anahtar kare garantisi (`resetPreviousFrame`) sağlar.
+*   [ScreenCapture.h](../agent/capture/ScreenCapture.h) / [.cpp](../agent/capture/ScreenCapture.cpp): Ekran görüntüsünü alıp sıkıştıran, yalnızca değişen alanları (**dirty tiles**) tespit edip gönderen performanslı ekran yakalama motoru. Linux X11/Qt, Wayland (XDG Portal + PipeWire) ve Windows Win32 GDI nesne havuzuna (HDC/HBITMAP reuse) sahiptir. Akış yeniden başladığında tam anahtar kare garantisi (`resetPreviousFrame`) sağlar.
+*   [WaylandPortalCapture.h](../agent/capture/WaylandPortalCapture.h) / [.cpp](../agent/capture/WaylandPortalCapture.cpp): Wayland oturumlarında `org.freedesktop.portal.ScreenCast` (QtDBus) ve `libpipewire-0.3` üzerinden ekran akışı yakalayan ve `restore_token` kalıcılığı sağlayan singleton yakalama modülü.
 
 ### 3.4 `agent/input/` (Girdi Kontrolü)
 *   [InputController.h](../agent/input/InputController.h) / [.cpp](../agent/input/InputController.cpp): Master'dan gelen fare/klavye olaylarını sisteme simüle eden (Linux XTest, Windows `SendInput`), klavye ve fareyi kilitleyen (`INPUT_LOCK`) platform girdi motoru.
+*   [EvdevController.h](../agent/input/EvdevController.h) / [.cpp](../agent/input/EvdevController.cpp): Linux Wayland oturumları ve anti-sabotaj koruması için root servis (`okidia-agent`) seviyesinde `/dev/input/event*` donanım kilidi (`EVIOCGRAB`, USB hotplug taramalı) ve `/dev/uinput` sanal fare/klavye enjeksiyonu sağlayan modül.
 
 ### 3.5 `agent/commands/` (Komut Yürütücüler)
 *   [CommandHandler.h](../agent/commands/CommandHandler.h) / [.cpp](../agent/commands/CommandHandler.cpp): Gelen komut zarflarını okuyup alt yürütücülere delege eden ana koordinatör.

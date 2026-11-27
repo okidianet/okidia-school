@@ -72,6 +72,7 @@ public:
 
     void setChatLocked   (const QString& roomId, bool locked);
     void setPrivateLocked(bool locked);
+    void setSpamMuted    (qint64 mutedUntil, const QString& reason);
 
 signals:
     void messageSent          (const QString& roomId,    const QString& content);
@@ -92,6 +93,7 @@ private slots:
     void onTabChanged(int index);
     void onTabCloseRequested(int index);
     void onFlashTimerTick();
+    void onMuteTimerTick();
     void onHelpButtonClicked();
 
     void onMemberDoubleClicked(QListWidgetItem* item);
@@ -102,6 +104,7 @@ private:
     struct TabItem {
         QString id;
         bool    isPrivate = false;
+        bool    roomLocked = false;
         QString title;
         int     unread = 0;
         ui::chat::ChatModel*  model  = nullptr;
@@ -114,6 +117,7 @@ private:
     void notifyUnread(const QString& id);
     void clearUnread (const QString& id);
     void updateTabDisplay(int tabIndex);
+    void applyInputLockState(TabItem* tab);
 
     QString m_myClientId;
     QString m_myDisplay;
@@ -131,4 +135,9 @@ private:
 
     QTimer* m_flashTimer = nullptr;
     bool    m_flashState = false;
+
+    QTimer* m_muteTimer   = nullptr;
+    qint64  m_mutedUntil  = 0;
+    QString m_muteReason;
+    qint64  m_lastHelpAt  = 0;
 };
